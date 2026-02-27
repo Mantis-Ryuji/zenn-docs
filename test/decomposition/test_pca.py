@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from ...src.decomposition.pca import PCA
+from decomposition.pca import PCA
 
 
 @pytest.fixture(scope="module")
