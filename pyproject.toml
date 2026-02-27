@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zenn code"
+version = "0.0.0"
+description = "zenn code check (not for publishing)"
+requires-python = ">=3.10"
+
+dependencies = [
+  "torch>=2.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7,<9",
+  "ruff>=0.4",
+  "pyright>=1.1.370",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["src"]
+# 今後増える前提で広めに拾う（src配下のパッケージを全部）
+include = ["*"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-q -ra"
+testpaths = ["test"]
+python_files = ["test_*.py"]
+pythonpath = ["src"]
+
+# ruff（任意）
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E203"]
+
+# pyright（任意）
+[tool.pyright]
+pythonVersion = "3.10"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = "none"
+reportUnknownMemberType = "none"
+reportUnknownVariableType = "none"
+reportUnknownArgumentType = "none"
