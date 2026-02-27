@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, TypeAlias, Union
 
@@ -8,6 +7,8 @@ import torch
 
 Tensor: TypeAlias = torch.Tensor
 PathLike: TypeAlias = Union[str, Path]
+
+__all__ = ["PCA"]
 
 
 def _as_tensor_2d(x: Any, *, dtype: Optional[torch.dtype], device: Optional[torch.device]) -> Tensor:
@@ -53,23 +54,6 @@ def _as_tensor_2d(x: Any, *, dtype: Optional[torch.dtype], device: Optional[torc
 def _safe_div(a: Tensor, b: Tensor, eps: float) -> Tensor:
     """ゼロ割を避けた安全な除算 a / max(b, eps)。"""
     return a / b.clamp_min(eps)
-
-
-@dataclass(frozen=True)
-class PCAState:
-    """PCAの保存用状態（torch.saveのpayloadに載せる）。"""
-    n_components: int
-    center: bool
-    whiten: bool
-    eps: float
-    mean: Tensor
-    loadings: Tensor
-    singular_values: Tensor
-    explained_variance: Tensor
-    explained_variance_ratio: Tensor
-    n_samples: int
-    dtype: str
-    device: str
 
 
 class PCA:
@@ -132,9 +116,11 @@ class PCA:
     -----
     - SVDは `torch.linalg.svd(Xc, full_matrices=False)` を用いる。
       これは厳密だが、大規模 (N,dが非常に大きい) ではメモリ/計算が重い。
-      近似SVD（randomized等）を導入したい場合は別途設計する。
     - explained_variance_ratio_ は「上位k内での正規化」である点に注意。
       全成分（rank全体）でのEVRが必要なら全特異値が必要。
+    - PyTorch 2.6 以降では `torch.load` の `weights_only` のデフォルトが True になった。
+      本実装は checkpoint を「Tensor + プリミティブのみ」の辞書として保存し、
+      `weights_only=True` で安全にロードできる形式にしている。
 
     Raises
     ------
@@ -146,13 +132,12 @@ class PCA:
     Examples
     --------
     >>> import torch
+    >>> from decomposition.pca import PCA
     >>> X = torch.randn(1000, 256, device="cuda")
-    >>> pca = PCA(n_components=32, center=True, whiten=False).fit(X)
-    >>> Z = pca.transform(X)  # (1000, 32)
+    >>> pca = PCA(n_components=32).fit(X)
+    >>> Z = pca.transform(X)
     >>> pca.save("pca.pt")
-    >>> pca2 = PCA.load("pca.pt", map_location="cuda")
-    >>> torch.allclose(pca.loadings, pca2.loadings)
-    True
+    >>> pca2 = PCA.load("pca.pt", map_location="cpu")
     """
 
     def __init__(
@@ -193,18 +178,7 @@ class PCA:
 
     @property
     def loadings(self) -> Tensor:
-        """loadings_（主軸）への別名アクセス。
-
-        Returns
-        -------
-        loadings : torch.Tensor
-            形状 (d, k) の主軸行列。
-
-        Raises
-        ------
-        RuntimeError
-            未学習の場合。
-        """
+        """loadings_（主軸）への別名アクセス。"""
         if not self.fitted_ or self.loadings_ is None:
             raise RuntimeError("PCAは未学習です。fit() を先に呼んでください。")
         return self.loadings_
@@ -241,10 +215,10 @@ class PCA:
 
         k = self.n_components
         if k > min(n, d):
-            raise ValueError(f"n_components={k} は min(N,d)={min(n,d)} 以下である必要があります。")
+            raise ValueError(f"n_components={k} は min(N,d)={min(n, d)} 以下である必要があります。")
 
         if self.center:
-            mean = X.mean(dim=0)  # (d,)
+            mean = X.mean(dim=0)
             Xc = X - mean
         else:
             mean = torch.zeros(d, dtype=X.dtype, device=X.device)
@@ -253,7 +227,7 @@ class PCA:
         # Xc = U S Vh
         _, S, Vh = torch.linalg.svd(Xc, full_matrices=False)
 
-        S_k = S[:k]  # (k,)
+        S_k = S[:k]
         V_k = Vh[:k, :].T.contiguous()  # (d, k)
 
         explained_var = (S_k * S_k) / float(n)  # lambda_i = sigma_i^2 / N
@@ -298,7 +272,9 @@ class PCA:
 
         X = _as_tensor_2d(X, dtype=self.mean_.dtype, device=self.mean_.device)
         if int(X.shape[1]) != int(self.mean_.shape[0]):
-            raise ValueError(f"入力d={int(X.shape[1])}が学習時d={int(self.mean_.shape[0])}と一致しません。")
+            raise ValueError(
+                f"入力d={int(X.shape[1])}が学習時d={int(self.mean_.shape[0])}と一致しません。"
+            )
 
         Xc = X - self.mean_ if self.center else X
         Z = Xc @ self.loadings_
@@ -308,22 +284,19 @@ class PCA:
         return Z
 
     def fit_transform(self, X: Tensor) -> Tensor:
-        """学習と変換をまとめて実行する。
-
-        Parameters
-        ----------
-        X : torch.Tensor
-            入力データ。形状 (N, d)。
-
-        Returns
-        -------
-        Z : torch.Tensor
-            主成分得点。形状 (N, k)。
-        """
+        """学習と変換をまとめて実行する。"""
         self.fit(X)
         return self.transform(X)
 
     def _state_dict(self) -> Dict[str, Any]:
+        """学習済みパラメータを「Tensor + プリミティブのみ」の辞書として返す。
+
+        Notes
+        -----
+        PyTorch 2.6 以降では `torch.load(..., weights_only=True)` がデフォルトになり、
+        任意のクラス（dataclass 等）を含むpickleの復元がブロックされる。
+        そのため、本実装では checkpoint 内にカスタムクラスのインスタンスを含めない。
+        """
         if not self.fitted_:
             raise RuntimeError("未学習のため保存できません。fit() を先に呼んでください。")
         assert self.mean_ is not None
@@ -333,20 +306,21 @@ class PCA:
         assert self.explained_variance_ratio_ is not None
         assert self.n_samples_ is not None
 
-        state = PCAState(
-            n_components=self.n_components,
-            center=self.center,
-            whiten=self.whiten,
-            eps=self.eps,
-            mean=self.mean_.detach().cpu(),
-            loadings=self.loadings_.detach().cpu(),
-            singular_values=self.singular_values_.detach().cpu(),
-            explained_variance=self.explained_variance_.detach().cpu(),
-            explained_variance_ratio=self.explained_variance_ratio_.detach().cpu(),
-            n_samples=int(self.n_samples_),
-            dtype=str(self.mean_.dtype),
-            device=str(self.mean_.device),
-        )
+        state: Dict[str, Any] = {
+            "format_version": 1,
+            "n_components": int(self.n_components),
+            "center": bool(self.center),
+            "whiten": bool(self.whiten),
+            "eps": float(self.eps),
+            "mean": self.mean_.detach().cpu(),
+            "loadings": self.loadings_.detach().cpu(),
+            "singular_values": self.singular_values_.detach().cpu(),
+            "explained_variance": self.explained_variance_.detach().cpu(),
+            "explained_variance_ratio": self.explained_variance_ratio_.detach().cpu(),
+            "n_samples": int(self.n_samples_),
+            "dtype": str(self.mean_.dtype),
+            "device": str(self.mean_.device),
+        }
         return {"pca_state": state}
 
     def save(self, path: PathLike) -> None:
@@ -356,10 +330,6 @@ class PCA:
         ----------
         path : str | pathlib.Path
             保存先パス（例: "pca.pt"）。
-
-        Returns
-        -------
-        None
 
         Raises
         ------
@@ -408,19 +378,42 @@ class PCA:
         if not p.exists():
             raise FileNotFoundError(str(p))
 
-        payload = torch.load(p, map_location=map_location)
+        # PyTorch 2.6+ は weights_only=True がデフォルト（安全側）。
+        # 本実装は dict-only 形式のため weights_only=True で読み込む。
+        try:
+            payload = torch.load(p, map_location=map_location, weights_only=True)
+        except TypeError:
+            # 古いPyTorchでは weights_only 引数が存在しない可能性がある
+            payload = torch.load(p, map_location=map_location)
+
         if not isinstance(payload, dict) or "pca_state" not in payload:
             raise ValueError("PCAチェックポイント形式が不正です（'pca_state' がありません）。")
 
         state = payload["pca_state"]
-        if not isinstance(state, PCAState):
-            raise ValueError("PCAチェックポイント形式が不正です（pca_state が PCAState ではありません）。")
+        if not isinstance(state, dict):
+            raise ValueError("PCAチェックポイント形式が不正です（pca_state が dict ではありません）。")
+
+        required_keys = (
+            "n_components",
+            "center",
+            "whiten",
+            "eps",
+            "mean",
+            "loadings",
+            "singular_values",
+            "explained_variance",
+            "explained_variance_ratio",
+            "n_samples",
+        )
+        missing = [k for k in required_keys if k not in state]
+        if missing:
+            raise ValueError(f"PCAチェックポイント形式が不正です（欠損キー: {missing}）。")
 
         pca = cls(
-            n_components=state.n_components,
-            center=state.center,
-            whiten=state.whiten,
-            eps=state.eps,
+            n_components=int(state["n_components"]),
+            center=bool(state["center"]),
+            whiten=bool(state["whiten"]),
+            eps=float(state["eps"]),
             dtype=dtype,
             device=torch.device(device) if device is not None else None,
         )
@@ -433,11 +426,14 @@ class PCA:
         else:
             tgt_device = None
 
-        mean = state.mean
-        loadings = state.loadings
-        sv = state.singular_values
-        ev = state.explained_variance
-        evr = state.explained_variance_ratio
+        mean = state["mean"]
+        loadings = state["loadings"]
+        sv = state["singular_values"]
+        ev = state["explained_variance"]
+        evr = state["explained_variance_ratio"]
+
+        if not isinstance(mean, torch.Tensor) or not isinstance(loadings, torch.Tensor):
+            raise ValueError("PCAチェックポイント形式が不正です（テンソルが見つかりません）。")
 
         if dtype is not None:
             mean = mean.to(dtype=dtype)
@@ -459,6 +455,6 @@ class PCA:
         pca.singular_values_ = sv
         pca.explained_variance_ = ev
         pca.explained_variance_ratio_ = evr
-        pca.n_samples_ = int(state.n_samples)
+        pca.n_samples_ = int(state["n_samples"])
         pca.fitted_ = True
         return pca
