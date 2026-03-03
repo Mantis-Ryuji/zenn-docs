@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import math
+import pickle
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, TypedDict
 
@@ -14,12 +16,7 @@ from projection_head import MLPProjectionHead, ProjectionHeadConfig
 from resnet_encoder import ResNet50Encoder, ResNet50EncoderConfig
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
-
-# tqdm は optional（無ければ通常 print ログにフォールバック）
-try:
-    from tqdm.auto import tqdm  # type: ignore
-except Exception:  # pragma: no cover
-    tqdm = None  # type: ignore
+from tqdm.auto import tqdm
 
 AmpDType = Literal["bf16", "fp16", "none"]
 
@@ -73,7 +70,7 @@ class SimCLRTrainerConfig:
     use_nesterov: bool = False
 
     # loss
-    temperature: float = 0.5
+    temperature: float = 0.1
 
     # AMP
     amp_dtype: AmpDType = "bf16"
@@ -104,6 +101,47 @@ class SimCLRModel(nn.Module):
         h = self.encoder(x)          # (B, 2048)
         z = self.projector(h)        # (B, 128) (l2-normalized by default)
         return z
+
+
+
+def _torch_load_checkpoint(path: Path) -> dict[str, object]:
+    """チェックポイントを安全側に考慮して読み込む（PyTorch 2.6+ 対応）。
+
+    Notes
+    -----
+    - PyTorch 2.6 以降は `torch.load` の `weights_only` がデフォルト True になり、
+      dataclass 等の任意オブジェクトを payload に含めると UnpicklingError になりうる。
+    - その場合、自分が生成した信頼できる checkpoint に限って `weights_only=False` にフォールバックする。
+    """
+    try:
+        obj = torch.load(path, map_location="cpu")
+    except pickle.UnpicklingError:
+        try:
+            obj = torch.load(path, map_location="cpu", weights_only=False)  # type: ignore[call-arg]
+        except TypeError:
+            obj = torch.load(path, map_location="cpu")
+    if not isinstance(obj, dict):
+        raise TypeError("checkpoint payload must be a dict")
+    return obj  # type: ignore[return-value]
+
+
+def _atomic_write_json(data: dict[str, object], path: Path) -> None:
+    """JSON を atomic write（tmp -> replace）で保存する。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    tmp.replace(path)
+
+
+def _load_json_dict(path: Path) -> dict[str, object]:
+    if not path.exists():
+        raise FileNotFoundError(f"json not found: {path}")
+    with path.open("r", encoding="utf-8") as f:
+        obj = json.load(f)
+    if not isinstance(obj, dict):
+        raise TypeError(f"json must be an object/dict, got {type(obj).__name__}.")
+    return obj  # type: ignore[return-value]
 
 
 def _set_seed(seed: int) -> None:
@@ -328,6 +366,22 @@ class SimCLRTrainer:
             "sec": [],
         }
 
+        # resume history from JSON if available
+        history_path = self.out_dir / "training_history.json"
+        if start_epoch > 0 and history_path.exists():
+            loaded = _load_json_dict(history_path)
+            # validate minimal keys
+            for k in ("epoch", "global_step", "train_loss", "lr", "sec"):
+                if k not in loaded:
+                    raise KeyError(f"history json missing key: {k}")
+                if not isinstance(loaded[k], list):
+                    raise TypeError(f"history['{k}'] in json must be a list, got {type(loaded[k]).__name__}")
+            history = loaded  # type: ignore[assignment]
+        else:
+            # fresh run: reset history file to avoid mixing with older runs
+            _atomic_write_json(history, history_path) # type: ignore
+
+
         for ep in range(start_epoch, epochs):
             self.epoch = ep
             ep_loss, ep_sec = self._train_one_epoch(train_loader)
@@ -336,6 +390,9 @@ class SimCLRTrainer:
             history["train_loss"].append(float(ep_loss))
             history["lr"].append(float(self._scheduler.lr))
             history["sec"].append(float(ep_sec))
+
+            # persist history (atomic)
+            _atomic_write_json(history, history_path) # type: ignore
 
             # always update last.pt for auto-resume
             self._save_last_checkpoint()
@@ -408,9 +465,7 @@ class SimCLRTrainer:
         accum = int(self.cfg.accum_steps)
         if accum < 1:
             raise ValueError(f"accum_steps must be >=1. got {accum}")
-
-        use_tqdm = (tqdm is not None)
-        pbar = tqdm(train_loader, desc=f"train epoch {self.epoch+1:04d}", leave=False) if use_tqdm else train_loader # type: ignore
+        pbar = tqdm(train_loader, desc=f"train epoch {self.epoch+1:04d}", leave=False)
 
         for step, batch in enumerate(pbar):
             x = batch[0] if isinstance(batch, tuple | list) else batch
@@ -456,18 +511,8 @@ class SimCLRTrainer:
                     dt = time.time() - win_t0
                     mean_loss = win_loss / max(1, win_n)
                     lr = float(self._scheduler.lr)
-
-                    if use_tqdm:
-                        # tqdm の postfix に反映（print はしない）
-                        try:
-                            pbar.set_postfix(loss=f"{mean_loss:.4f}", lr=f"{lr:.3g}", sec=f"{dt:.1f}") # type: ignore
-                        except Exception:
-                            pass
-                    else:
-                        print(
-                            f"[epoch {self.epoch+1:04d}] step={self.global_step:07d} "
-                            f"loss={mean_loss:.4f} lr={lr:.6g} ({dt:.1f}s)"
-                        )
+                    # tqdm の postfix に反映
+                    pbar.set_postfix(loss=f"{mean_loss:.4f}", lr=f"{lr:.3g}", sec=f"{dt:.1f}")
 
                     win_loss = 0.0
                     win_n = 0
@@ -475,9 +520,6 @@ class SimCLRTrainer:
 
         ep_sec = time.time() - t_epoch0
         ep_loss = sum_loss / max(1, n_loss)
-
-        if not use_tqdm:
-            print(f"[epoch {self.epoch+1:04d}] end: loss={ep_loss:.4f} sec={ep_sec:.1f}")
 
         return float(ep_loss), float(ep_sec)
 
@@ -498,9 +540,7 @@ class SimCLRTrainer:
             if not path.exists():
                 raise FileNotFoundError(f"resume checkpoint not found: {path}")
 
-        payload = torch.load(path, map_location="cpu")
-        if not isinstance(payload, dict):
-            raise TypeError("checkpoint payload must be a dict")
+        payload = _torch_load_checkpoint(path)
 
         # restore (fail fast where possible)
         if "model" not in payload:
@@ -510,14 +550,22 @@ class SimCLRTrainer:
         if "optimizer" in payload:
             self.optimizer.load_state_dict(payload["optimizer"])  # type: ignore[arg-type]
 
-        self.epoch = int(payload.get("epoch", 0))
-        self.global_step = int(payload.get("global_step", 0))
+        self.epoch = int(payload.get("epoch", 0)) # type: ignore
+        self.global_step = int(payload.get("global_step", 0)) # type: ignore
 
         # optional: cfg/aug_cfg restore (useful for true resume)
-        if "cfg" in payload and isinstance(payload["cfg"], SimCLRTrainerConfig):
-            self.cfg = payload["cfg"]  # type: ignore[assignment]
-        if "aug_cfg" in payload and isinstance(payload["aug_cfg"], SimCLRAugConfig):
-            self.aug_cfg = payload["aug_cfg"]  # type: ignore[assignment]
+        cfg_obj = payload.get("cfg")
+        if isinstance(cfg_obj, dict):
+            self.cfg = SimCLRTrainerConfig(**cfg_obj)  # type: ignore[arg-type]
+        elif isinstance(cfg_obj, SimCLRTrainerConfig):
+            # backward-compat (old checkpoints)
+            self.cfg = cfg_obj  # type: ignore[assignment]
+
+        aug_obj = payload.get("aug_cfg")
+        if isinstance(aug_obj, dict):
+            self.aug_cfg = SimCLRAugConfig(**aug_obj)  # type: ignore[arg-type]
+        elif isinstance(aug_obj, SimCLRAugConfig):
+            self.aug_cfg = aug_obj  # type: ignore[assignment]
 
         self._resume_payload = payload  # type: ignore[assignment]
         return True
@@ -545,8 +593,8 @@ class SimCLRTrainer:
             "global_step": int(self.global_step),
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
-            "cfg": self.cfg,
-            "aug_cfg": self.aug_cfg,
+            "cfg": asdict(self.cfg),
+            "aug_cfg": asdict(self.aug_cfg),
         }
         if self._scheduler is not None:
             payload["scheduler"] = self._scheduler.state_dict()
@@ -559,8 +607,8 @@ class SimCLRTrainer:
                 "global_step": int(self.global_step),
                 "model": self.model.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
-                "cfg": self.cfg,
-                "aug_cfg": self.aug_cfg,
+                "cfg": asdict(self.cfg),
+                "aug_cfg": asdict(self.aug_cfg),
             }
             if self._scheduler is not None:
                 payload["scheduler"] = self._scheduler.state_dict()
