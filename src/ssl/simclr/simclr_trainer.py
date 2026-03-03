@@ -83,6 +83,9 @@ class SimCLRTrainerConfig:
     save_every: int = 5  # epochs
     keep_last_k: int = 1  # checkpoints
 
+    # resume
+    resume_from: str | Path | Literal["auto", "none"] = "auto"  # checkpoints
+
 
 class SimCLRModel(nn.Module):
     """Encoder + ProjectionHead の SimCLR モデル。"""
@@ -169,6 +172,44 @@ class WarmupCosineSchedule:
 
         self.step_idx += 1
 
+    def state_dict(self) -> dict[str, object]:
+        return {
+            "warmup_steps": int(self.warmup_steps),
+            "total_steps": int(self.total_steps),
+            "base_lrs": [float(x) for x in self.base_lrs],
+            "step_idx": int(self.step_idx),
+        }
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        # fail fast
+        warmup_steps = int(state["warmup_steps"])  # type: ignore[arg-type]
+        total_steps = int(state["total_steps"])    # type: ignore[arg-type]
+        base_lrs = list(state["base_lrs"])         # type: ignore[arg-type]
+        step_idx = int(state["step_idx"])          # type: ignore[arg-type]
+
+        if warmup_steps < 0 or total_steps <= 0 or warmup_steps >= total_steps:
+            raise ValueError("Invalid scheduler state.")
+        if len(base_lrs) != len(self.optimizer.param_groups):
+            raise ValueError("Scheduler state base_lrs length mismatch.")
+        self.warmup_steps = warmup_steps
+        self.total_steps = total_steps
+        self.base_lrs = [float(x) for x in base_lrs]
+        self.step_idx = step_idx
+
+        # restore lr consistent with current step
+        # (do not increment step_idx)
+        s = self.step_idx
+        if s <= 0:
+            scale = 0.0
+        elif s <= self.warmup_steps:
+            scale = float(s) / float(self.warmup_steps)
+        else:
+            t = float((s - 1) - self.warmup_steps) / float(self.total_steps - self.warmup_steps)
+            scale = 0.5 * (1.0 + math.cos(math.pi * t))
+        for g, base_lr in zip(self.optimizer.param_groups, self.base_lrs, strict=True):
+            g["lr"] = float(base_lr) * float(scale)
+
+
     @property
     def lr(self) -> float:
         return float(self.optimizer.param_groups[0]["lr"])
@@ -214,10 +255,11 @@ class SimCLRTrainer:
         self.epoch = 0
 
         self._scheduler: WarmupCosineSchedule | None = None
+        self._resume_payload: dict[str, object] | None = None
 
     # ---------- public API ----------
 
-    def fit(self, train_loader: DataLoader, *, max_epochs: int | None = None) -> FitHistory:  # type: ignore
+    def fit(self, train_loader: DataLoader, *, max_epochs: int | None = None, resume: str | Path | Literal["auto", "none"] | None = None) -> FitHistory:  # type: ignore
         if not isinstance(train_loader, DataLoader): # type: ignore
             raise TypeError("train_loader must be a torch.utils.data.DataLoader")
 
@@ -228,6 +270,27 @@ class SimCLRTrainer:
         steps_per_epoch = self._steps_per_epoch(train_loader)
         total_steps = steps_per_epoch * epochs
         warmup_steps = steps_per_epoch * int(self.cfg.warmup_epochs)
+
+
+        # resume (auto/explicit)
+        resume_spec = resume if resume is not None else self.cfg.resume_from
+        start_epoch = 0
+        if resume_spec != "none":
+            resumed = self._try_resume_from(resume_spec)
+            if resumed:
+                # continue from next epoch (checkpoint epoch is "completed epoch index")
+                start_epoch = int(self.epoch) + 1
+                # if already finished, return empty history with model loaded
+                if start_epoch >= epochs:
+                    return {
+                        "epoch": [],
+                        "global_step": [],
+                        "train_loss": [],
+                        "lr": [],
+                        "sec": [],
+                    }
+
+        # (re-)compute scheduler based on the *requested* total epochs
 
         # base lr scaling by global batch (accum included)
         target_lr = self._scaled_lr()
@@ -241,6 +304,22 @@ class SimCLRTrainer:
             base_lrs=[target_lr for _ in self.optimizer.param_groups],
         )
 
+        # restore scheduler position if resumed
+        if self._resume_payload is not None and self._scheduler is not None: # type: ignore
+            st = self._resume_payload.get("scheduler")
+            if isinstance(st, dict):
+                self._scheduler.load_state_dict(st)  # type: ignore[arg-type]
+            else:
+                # fallback: align scheduler to global_step
+                self._scheduler.load_state_dict(
+                    {
+                        "warmup_steps": int(warmup_steps),
+                        "total_steps": int(total_steps),
+                        "base_lrs": [float(target_lr) for _ in self.optimizer.param_groups],
+                        "step_idx": int(self.global_step),
+                    }
+                )
+
         history: FitHistory = {
             "epoch": [],
             "global_step": [],
@@ -249,7 +328,7 @@ class SimCLRTrainer:
             "sec": [],
         }
 
-        for ep in range(epochs):
+        for ep in range(start_epoch, epochs):
             self.epoch = ep
             ep_loss, ep_sec = self._train_one_epoch(train_loader)
             history["epoch"].append(int(ep))
@@ -257,6 +336,10 @@ class SimCLRTrainer:
             history["train_loss"].append(float(ep_loss))
             history["lr"].append(float(self._scheduler.lr))
             history["sec"].append(float(ep_sec))
+
+            # always update last.pt for auto-resume
+            self._save_last_checkpoint()
+
 
             if self.cfg.save_every > 0 and ((ep + 1) % self.cfg.save_every == 0):
                 self._save_checkpoint(tag=f"epoch_{ep+1:04d}")
@@ -398,17 +481,94 @@ class SimCLRTrainer:
 
         return float(ep_loss), float(ep_sec)
 
-    def _save_checkpoint(self, *, tag: str) -> None:
-        path = self.ckpt_dir / f"{tag}.pt"
-        payload = {
-            "epoch": self.epoch,
-            "global_step": self.global_step,
+
+    def _try_resume_from(self, resume_spec: str | Path | Literal["auto", "none"]) -> bool:
+        if resume_spec == "none":
+            self._resume_payload = None
+            return False
+
+        path: Path | None
+        if resume_spec == "auto":
+            path = self._find_auto_resume_checkpoint()
+            if path is None:
+                self._resume_payload = None
+                return False
+        else:
+            path = Path(resume_spec)
+            if not path.exists():
+                raise FileNotFoundError(f"resume checkpoint not found: {path}")
+
+        payload = torch.load(path, map_location="cpu")
+        if not isinstance(payload, dict):
+            raise TypeError("checkpoint payload must be a dict")
+
+        # restore (fail fast where possible)
+        if "model" not in payload:
+            raise KeyError("checkpoint missing: model")
+        self.model.load_state_dict(payload["model"])  # type: ignore[arg-type]
+
+        if "optimizer" in payload:
+            self.optimizer.load_state_dict(payload["optimizer"])  # type: ignore[arg-type]
+
+        self.epoch = int(payload.get("epoch", 0))
+        self.global_step = int(payload.get("global_step", 0))
+
+        # optional: cfg/aug_cfg restore (useful for true resume)
+        if "cfg" in payload and isinstance(payload["cfg"], SimCLRTrainerConfig):
+            self.cfg = payload["cfg"]  # type: ignore[assignment]
+        if "aug_cfg" in payload and isinstance(payload["aug_cfg"], SimCLRAugConfig):
+            self.aug_cfg = payload["aug_cfg"]  # type: ignore[assignment]
+
+        self._resume_payload = payload  # type: ignore[assignment]
+        return True
+
+    def _find_auto_resume_checkpoint(self) -> Path | None:
+        last = self.ckpt_dir / "last.pt"
+        if last.exists():
+            return last
+
+        # fallback: latest epoch_*.pt
+        pts = sorted(self.ckpt_dir.glob("epoch_*.pt"))
+        if len(pts) == 0:
+            return None
+        return pts[-1]
+
+    def _atomic_save(self, payload: dict[str, object], path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        torch.save(payload, tmp)
+        tmp.replace(path)
+
+    def _save_last_checkpoint(self) -> None:
+        payload: dict[str, object] = {
+            "epoch": int(self.epoch),
+            "global_step": int(self.global_step),
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "cfg": self.cfg,
             "aug_cfg": self.aug_cfg,
         }
-        torch.save(payload, path)
+        if self._scheduler is not None:
+            payload["scheduler"] = self._scheduler.state_dict()
+        self._atomic_save(payload, self.ckpt_dir / "last.pt")
+
+    def _save_checkpoint(self, *, tag: str) -> None:
+            path = self.ckpt_dir / f"{tag}.pt"
+            payload: dict[str, object] = {
+                "epoch": int(self.epoch),
+                "global_step": int(self.global_step),
+                "model": self.model.state_dict(),
+                "optimizer": self.optimizer.state_dict(),
+                "cfg": self.cfg,
+                "aug_cfg": self.aug_cfg,
+            }
+            if self._scheduler is not None:
+                payload["scheduler"] = self._scheduler.state_dict()
+
+            self._atomic_save(payload, path)
+
+            # always update last.pt for auto-resume
+            self._atomic_save(payload, self.ckpt_dir / "last.pt")
 
     def _prune_checkpoints(self, *, keep_last_k: int) -> None:
         if keep_last_k <= 0:

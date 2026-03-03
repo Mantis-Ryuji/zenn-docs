@@ -10,8 +10,11 @@ from torch.optim.optimizer import Optimizer
 
 DEFAULT_EXCLUDE_PATTERNS: tuple[str, ...] = (
     r"\.bias$",
-    r"\.ln\.(?:weight|bias)$",        # LayerNorm2d 内部
-    r"\.out_norm\.(?:weight|bias)$",  # 最終 LayerNorm
+    # --- normalization layers (typical SimCLR/LARS practice) ---
+    r"\.bn\d*\.(?:weight|bias)$",          # BatchNorm{1,2,3}d (ResNet: bn1/bn2/bn3 ...)
+    r"\.downsample\.1\.(?:weight|bias)$",  # ResNet downsample BN (Sequential[1])
+    r"\.ln\.(?:weight|bias)$",              # LayerNorm2d 内部
+    r"\.out_norm\.(?:weight|bias)$",        # 最終 LayerNorm
 )
 EETA_DEFAULT: float = 0.001
 
@@ -155,13 +158,14 @@ class LARS(Optimizer):
                 _ = float(closure())
 
         with torch.no_grad():
-            lr = float(self.cfg.lr)
+            default_lr = float(self.cfg.lr)
             m = float(self.cfg.momentum)
             wd = float(self.cfg.weight_decay)
             eeta = float(self.cfg.eeta)
             eps = float(self.cfg.eps)
 
             for group in self.param_groups:
+                lr = float(group.get("lr", default_lr))
                 for p in group["params"]:
                     if p.grad is None:
                         continue
