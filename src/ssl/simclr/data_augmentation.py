@@ -2,48 +2,61 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
 import torchvision.transforms.functional as TVF
 from torch import Tensor
 
-# ImageNet の標準
 CROP_PROPORTION: float = 0.875
+BrightnessImpl = Literal["simclrv1", "simclrv2"]
 
 
 @dataclass(frozen=True)
 class SimCLRAugConfig:
     """SimCLR 画像前処理（バッチ版）の設定。
 
+    本モジュールは torchvision.transforms を 1 サンプルずつ回すのではなく、(B,C,H,W) の
+    **バッチ Tensor に対してベクトル化した拡張**を適用する前提で設計されている。
+    学習用前処理（crop/flip/color distortion/blur）と、評価用前処理（resize + center crop）で
+    使い回すパラメータをまとめる。
+
     Parameters
     ----------
-    out_h : int=256
+    out_h : int, default=256
         出力画像の高さ。
-    out_w : int=256
+    out_w : int, default=256
         出力画像の幅。
     color_jitter_strength : float, default=1.0
-        TF版の FLAGS.color_jitter_strength 相当。color_jitter の強度。
-    impl : str, default="simclrv2"
-        brightness 実装。
-        - "simclrv2": 乗算（factor を掛ける）
-        - "simclrv1": 加算（delta を足す）
+        Color jitter の強度スケール。
+        brightness / contrast / saturation は 0.8 * strength、hue は 0.2 * strength を上限として使う。
+    impl : {"simclrv2", "simclrv1"}, default="simclrv2"
+        brightness の実装流儀。
+        - "simclrv2": 乗算（factor を掛ける）方式
+        - "simclrv1": 加算（delta を足す）方式
     crop : bool, default=True
-        学習時に RandomResizedCrop を行うか。
+        学習時に random resized crop を行うかどうか。
     flip : bool, default=True
-        学習時に左右反転を行うか。
+        学習時に左右反転を行うかどうか。
     color_distort : bool, default=True
-        学習時に color jitter + grayscale を行うか。
+        学習時に color jitter + grayscale を行うかどうか。
     blur : bool, default=True
-        学習時に Gaussian blur を行うか（SimCLR 標準レシピ）。
+        学習時に Gaussian blur を行うかどうか。
     blur_prob : float, default=0.5
         blur の適用確率（各サンプル独立）。
+
+    Notes
+    -----
+    - すべての前処理は (B,C,H,W) の Tensor 入力を想定し、値域は [0,1] にクリップして扱う実装を想定する。
+    - blur_prob は「各サンプル独立」の Bernoulli で判定される（バッチ一括ではない）。
+    - out_h/out_w は学習・評価の両方で最終解像度として利用される。
     """
 
     out_h: int = 256
     out_w: int = 256
     color_jitter_strength: float = 1.0
-    impl: str = "simclrv2"
+    impl: BrightnessImpl = "simclrv2"
     crop: bool = True
     flip: bool = True
     color_distort: bool = True
@@ -52,9 +65,8 @@ class SimCLRAugConfig:
 
 
 def _as_float01_bchw(x: Tensor) -> Tensor:
-    """入力を float32 / [0,1] / (B,C,H,W) に正規化する（Fail Fast）。"""
     if not isinstance(x, Tensor): # type: ignore
-        raise TypeError(f"x must be torch.Tensor. got {type(x)}")
+        raise TypeError(f"x must be torch.Tensor. got {type(x).__name__}")
     if x.ndim != 4:
         raise ValueError(f"x must be 4D (B,C,H,W). got shape={tuple(x.shape)}")
     if x.shape[1] != 3:
@@ -65,18 +77,16 @@ def _as_float01_bchw(x: Tensor) -> Tensor:
     else:
         x = x.float()
 
-    return x.clamp_(0.0, 1.0)
+    return x.clamp(0.0, 1.0)
 
 
 def _rand_bool_mask(bsz: int, p: float, *, device: torch.device) -> Tensor:
-    """Bernoulli mask. mask # (B,) bool"""
     if not (0.0 <= float(p) <= 1.0):
         raise ValueError(f"p must be in [0,1]. got {p}")
-    return torch.rand((bsz,), device=device) < float(p)
+    return (torch.rand((bsz,), device=device) < float(p)).to(torch.bool)
 
 
 def _apply_where(mask_b: Tensor, x_new: Tensor, x_old: Tensor) -> Tensor:
-    """mask_b # (B,) を (B,1,1,1) に拡張して select."""
     if mask_b.ndim != 1:
         raise ValueError(f"mask must be 1D (B,). got shape={tuple(mask_b.shape)}")
     m = mask_b[:, None, None, None]
@@ -86,8 +96,7 @@ def _apply_where(mask_b: Tensor, x_new: Tensor, x_old: Tensor) -> Tensor:
 # -------------------------
 # Color jitter primitives (batch-safe)
 # -------------------------
-def _random_brightness(x: Tensor, max_delta: float, *, impl: str) -> Tensor:
-    """brightness（SimCLRv2: 乗算 / SimCLRv1: 加算）。x # (B,3,H,W)"""
+def _random_brightness(x: Tensor, max_delta: float, *, impl: BrightnessImpl) -> Tensor:
     bsz = x.shape[0]
     device = x.device
     if float(max_delta) <= 0.0:
@@ -98,40 +107,34 @@ def _random_brightness(x: Tensor, max_delta: float, *, impl: str) -> Tensor:
         hi = 1.0 + float(max_delta)
         factor = torch.empty((bsz, 1, 1, 1), device=device).uniform_(lo, hi)
         return (x * factor).clamp(0.0, 1.0)
-    if impl == "simclrv1":
-        delta = torch.empty((bsz, 1, 1, 1), device=device).uniform_(-float(max_delta), float(max_delta))
-        return (x + delta).clamp(0.0, 1.0)
 
-    raise ValueError(f"Unknown impl for brightness: {impl}")
+    # impl == "simclrv1"
+    delta = torch.empty((bsz, 1, 1, 1), device=device).uniform_(-float(max_delta), float(max_delta))
+    return (x + delta).clamp(0.0, 1.0)
 
 
 def _random_contrast(x: Tensor, max_delta: float) -> Tensor:
-    """contrast をランダムに（バッチ対応）。x # (B,3,H,W)"""
     if float(max_delta) <= 0.0:
         return x
     bsz = x.shape[0]
     device = x.device
     factor = torch.empty((bsz, 1, 1, 1), device=device).uniform_(1.0 - float(max_delta), 1.0 + float(max_delta))
-    mean = x.mean(dim=(2, 3), keepdim=True)  # (B,3,1,1)
-    y = (x - mean) * factor + mean
-    return y.clamp(0.0, 1.0)
+    mean = x.mean(dim=(2, 3), keepdim=True)
+    return ((x - mean) * factor + mean).clamp(0.0, 1.0)
 
 
 def _random_saturation(x: Tensor, max_delta: float) -> Tensor:
-    """saturation をランダムに（バッチ対応）。x # (B,3,H,W)"""
     if float(max_delta) <= 0.0:
         return x
     bsz = x.shape[0]
     device = x.device
     factor = torch.empty((bsz, 1, 1, 1), device=device).uniform_(1.0 - float(max_delta), 1.0 + float(max_delta))
-    gray = (0.2989 * x[:, 0:1] + 0.5870 * x[:, 1:2] + 0.1140 * x[:, 2:3])  # (B,1,H,W)
+    gray = (0.2989 * x[:, 0:1] + 0.5870 * x[:, 1:2] + 0.1140 * x[:, 2:3])
     gray3 = gray.expand(-1, 3, -1, -1)
-    y = x * factor + gray3 * (1.0 - factor)
-    return y.clamp(0.0, 1.0)
+    return (x * factor + gray3 * (1.0 - factor)).clamp(0.0, 1.0)
 
 
 def _rgb_to_hsv(x: Tensor) -> Tensor:
-    """x # (B,3,H,W) in [0,1] -> hsv # (B,3,H,W)"""
     r, g, b = x[:, 0], x[:, 1], x[:, 2]
     maxc = torch.maximum(torch.maximum(r, g), b)
     minc = torch.minimum(torch.minimum(r, g), b)
@@ -149,13 +152,12 @@ def _rgb_to_hsv(x: Tensor) -> Tensor:
     h = torch.where((maxc == r) & (delt > 0), (bc - gc), h)
     h = torch.where((maxc == g) & (delt > 0), (2.0 + rc - bc), h)
     h = torch.where((maxc == b) & (delt > 0), (4.0 + gc - rc), h)
-    h = (h / 6.0) % 1.0  # [0,1)
+    h = (h / 6.0) % 1.0
 
     return torch.stack([h, s, v], dim=1)
 
 
 def _hsv_to_rgb(hsv: Tensor) -> Tensor:
-    """hsv # (B,3,H,W) -> rgb # (B,3,H,W)"""
     h, s, v = hsv[:, 0], hsv[:, 1], hsv[:, 2]
     h6 = (h * 6.0) % 6.0
     i = torch.floor(h6).to(torch.int64)
@@ -165,15 +167,25 @@ def _hsv_to_rgb(hsv: Tensor) -> Tensor:
     q = v * (1.0 - s * f)
     t = v * (1.0 - s * (1.0 - f))
 
-    r = torch.where(i == 0, v, torch.where(i == 1, q, torch.where(i == 2, p, torch.where(i == 3, p, torch.where(i == 4, t, v)))))
-    g = torch.where(i == 0, t, torch.where(i == 1, v, torch.where(i == 2, v, torch.where(i == 3, q, torch.where(i == 4, p, p)))))
-    b = torch.where(i == 0, p, torch.where(i == 1, p, torch.where(i == 2, t, torch.where(i == 3, v, torch.where(i == 4, v, q)))))
-
+    r = torch.where(
+        i == 0,
+        v,
+        torch.where(i == 1, q, torch.where(i == 2, p, torch.where(i == 3, p, torch.where(i == 4, t, v)))),
+    )
+    g = torch.where(
+        i == 0,
+        t,
+        torch.where(i == 1, v, torch.where(i == 2, v, torch.where(i == 3, q, torch.where(i == 4, p, p)))),
+    )
+    b = torch.where(
+        i == 0,
+        p,
+        torch.where(i == 1, p, torch.where(i == 2, t, torch.where(i == 3, v, torch.where(i == 4, v, q)))),
+    )
     return torch.stack([r, g, b], dim=1)
 
 
 def _random_hue(x: Tensor, max_delta: float) -> Tensor:
-    """hue をランダムに（バッチ対応）。x # (B,3,H,W)"""
     if float(max_delta) <= 0.0:
         return x
     bsz = x.shape[0]
@@ -181,46 +193,38 @@ def _random_hue(x: Tensor, max_delta: float) -> Tensor:
     delta = torch.empty((bsz, 1, 1), device=device).uniform_(-float(max_delta), float(max_delta))
     hsv = _rgb_to_hsv(x)
     h = (hsv[:, 0] + delta).remainder(1.0)
-    hsv = torch.stack([h, hsv[:, 1], hsv[:, 2]], dim=1)
-    y = _hsv_to_rgb(hsv)
-    return y.clamp(0.0, 1.0)
+    return _hsv_to_rgb(torch.stack([h, hsv[:, 1], hsv[:, 2]], dim=1)).clamp(0.0, 1.0)
 
 
 def _to_grayscale_keep3(x: Tensor) -> Tensor:
-    """RGB->Gray（3ch維持）。x # (B,3,H,W)"""
     return TVF.rgb_to_grayscale(x, num_output_channels=3)
 
 
-def color_jitter_batch(
-    x: Tensor,
-    *,
-    strength: float,
-    random_order: bool = True,
-    impl: str = "simclrv2",
-) -> Tensor:
-    """SimCLR の color jitter（バッチ版、ベクトル化）。
+def color_jitter_batch(x: Tensor, *, strength: float, impl: BrightnessImpl) -> Tensor:
+    """SimCLR の color jitter（バッチ版、サンプルごとに順序シャッフル）。
 
-    Notes
-    -----
-    random_order=True の場合、**サンプルごとに順序をシャッフル**する。
-    バッチ方向の分岐を避けるため、各ステップで 4 変換候補を全て計算し、
-    perm に従って mask で選択して合成する（ステップ数 4 の固定ループのみ）。
+    brightness / contrast / saturation / hue の 4 変換を、それぞれ確率ではなく「必ず」適用するが、
+    **各サンプルごとに適用順序をランダムにシャッフル**する。
+    これにより、バッチ内で同一順序に固定されることを避け、SimCLR の実装流儀に近づける。
 
     Parameters
     ----------
     x : torch.Tensor
-        入力。x # (B, 3, H, W), range [0,1]
+        入力画像。shape は (B, 3, H, W)、値域は [0,1] を想定する。
     strength : float
-        強度。brightness/contrast/saturation は 0.8*strength、hue は 0.2*strength。
-    random_order : bool, default=True
-        jitter の順序をランダムにするか。
-    impl : str, default="simclrv2"
-        brightness の実装。
+        jitter 強度。0 以下の場合は入力をそのまま返す。
+    impl : {"simclrv1", "simclrv2"}
+        brightness の実装流儀（加算/乗算）。
 
     Returns
     -------
     torch.Tensor
-        出力。y # (B, 3, H, W)
+        jitter 後の画像。shape は (B, 3, H, W)。値域は [0,1] にクリップされる。
+
+    Notes
+    -----
+    - サンプルごとの順序シャッフルは perm (B,4) を生成して実現する。
+    - 各変換はバッチ演算として実装されており、Python ループは「4 変換の順序適用」に限定される。
     """
     s = float(strength)
     if s <= 0.0:
@@ -243,51 +247,59 @@ def color_jitter_batch(
     def f_h(xx: Tensor) -> Tensor:
         return _random_hue(xx, h)
 
-    if not random_order:
-        y = x
-        for fn in (f_b, f_c, f_s, f_h):
-            y = fn(y)
-        return y.clamp(0.0, 1.0)
-
     bsz = x.shape[0]
     device = x.device
-
-    # perm # (B,4): 各行が [0,1,2,3] のランダム順列
     perm = torch.stack([torch.randperm(4, device=device) for _ in range(bsz)], dim=0)
 
     y = x
     for t in range(4):
-        # 同一入力 y から 4候補を並列生成
         y0 = f_b(y)
         y1 = f_c(y)
         y2 = f_s(y)
         y3 = f_h(y)
 
-        idx = perm[:, t]  # (B,)
-
+        idx = perm[:, t]
         y = _apply_where(idx == 0, y0, y)
         y = _apply_where(idx == 1, y1, y)
         y = _apply_where(idx == 2, y2, y)
         y = _apply_where(idx == 3, y3, y)
 
-        y = y.clamp(0.0, 1.0)
-
-    return y
+    return y.clamp(0.0, 1.0)
 
 
-def random_color_jitter_batch(
-    x: Tensor,
-    *,
-    strength: float,
-    impl: str,
-    p: float = 1.0,
-) -> Tensor:
-    """SimCLR の random_color_jitter（バッチ版）。
+def random_color_distort_batch(x: Tensor, *, strength: float, impl: BrightnessImpl, p: float = 1.0) -> Tensor:
+    """SimCLR の color distortion（jitter + grayscale）を確率適用（バッチ版）。
 
-    TF版相当：
-      - 全体 transform を p で適用
-      - color_jitter を 0.8 で適用
-      - grayscale を 0.2 で適用
+    サンプルごとに確率 p で「color distortion」を適用する。
+    color distortion は以下の合成から成る。
+    - 確率 0.8 で color jitter
+    - 確率 0.2 で grayscale（3ch のまま）
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        入力画像。shape は (B, 3, H, W)、値域は [0,1] を想定する。
+    strength : float
+        color jitter の強度。
+    impl : {"simclrv1", "simclrv2"}
+        brightness の実装流儀。
+    p : float, default=1.0
+        distortion 全体を適用する確率（各サンプル独立）。
+
+    Returns
+    -------
+    torch.Tensor
+        変換後の画像。shape は (B, 3, H, W)。値域は [0,1] にクリップされる。
+
+    Raises
+    ------
+    ValueError
+        p が [0,1] でない場合（内部の乱数マスク生成で検証される）。
+
+    Notes
+    -----
+    - p によるマスク（m_all）で対象サンプルを決め、jitter/grayscale はその subset に対してさらに独立判定する。
+    - いずれの変換も「対象サンプルのみを差し替える」方式（torch.where）でバッチを維持する。
     """
     bsz = x.shape[0]
     device = x.device
@@ -300,7 +312,7 @@ def random_color_jitter_batch(
 
     m_j = _rand_bool_mask(bsz, 0.8, device=device) & m_all
     if m_j.any().item():
-        y_j = color_jitter_batch(y, strength=strength, random_order=True, impl=impl)
+        y_j = color_jitter_batch(y, strength=strength, impl=impl)
         y = _apply_where(m_j, y_j, y)
 
     m_g = _rand_bool_mask(bsz, 0.2, device=device) & m_all
@@ -315,7 +327,6 @@ def random_color_jitter_batch(
 # Crop / flip / blur
 # -------------------------
 def _center_crop_and_resize_batch(x: Tensor, out_h: int, out_w: int, crop_proportion: float) -> Tensor:
-    """TF版 center_crop 相当（バッチ版）。"""
     _, _, h, w = x.shape
     aspect = out_w / out_h
 
@@ -348,10 +359,41 @@ def random_resized_crop_batch(
     aspect_ratio_range: tuple[float, float] = (0.75, 1.33),
     p: float = 1.0,
 ) -> Tensor:
-    """SimCLR の crop_and_resize 相当（バッチ版・ベクトル化）。
+    """RandomResizedCrop 相当の処理をバッチで行う。
 
-    TF版 sample_distorted_bounding_box(max_attempts=100) の厳密再現は避け、
-    1回サンプルでクロップ領域を決める（ベクトル化優先）。
+    サンプルごとにランダムな crop 矩形（面積比・アスペクト比）を生成し、指定解像度にリサイズする。
+    実装は grid_sample を用いたベクトル化で、サンプルごとの crop を 1 回の演算で処理する。
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        入力画像。shape は (B, C, H, W)、値域は [0,1] を想定する。
+    out_h : int
+        出力高さ。
+    out_w : int
+        出力幅。
+    area_range : tuple[float, float], default=(0.08, 1.0)
+        crop 面積比の範囲（各サンプル独立に一様サンプリング）。
+    aspect_ratio_range : tuple[float, float], default=(0.75, 1.33)
+        crop アスペクト比の範囲（log-space で一様サンプリング）。
+    p : float, default=1.0
+        適用確率（各サンプル独立）。適用されないサンプルは入力をそのまま返す。
+
+    Returns
+    -------
+    torch.Tensor
+        出力画像。shape は (B, C, out_h, out_w)。値域は [0,1] にクリップされる。
+
+    Raises
+    ------
+    ValueError
+        p が [0,1] でない場合（内部の乱数マスク生成で検証される）。
+
+    Notes
+    -----
+    - apply マスクで対象サンプルのみ差し替えるため、バッチ全体の shape は維持される。
+    - grid_sample は align_corners=True を使用している（座標変換の仕様に依存するため、必要なら統一すること）。
+    - padding_mode="zeros" のため、crop が画像外に出る場合（理論上は clamp 済みで稀）には 0 埋めとなる。
     """
     b, _, h, w = x.shape
     device = x.device
@@ -379,8 +421,8 @@ def random_resized_crop_batch(
     off_x = (torch.rand((b,), device=device) * (max_off_x + 1).float()).floor().to(torch.long)
     off_y = (torch.rand((b,), device=device) * (max_off_y + 1).float()).floor().to(torch.long)
 
-    yy = torch.linspace(0, 1, steps=out_h, device=device)[None, :, None]  # (1,OH,1)
-    xx = torch.linspace(0, 1, steps=out_w, device=device)[None, None, :]  # (1,1,OW)
+    yy = torch.linspace(0, 1, steps=out_h, device=device)[None, :, None]
+    xx = torch.linspace(0, 1, steps=out_w, device=device)[None, None, :]
 
     crop_h_f = (crop_h - 1).clamp(min=1).float()[:, None, None]
     crop_w_f = (crop_w - 1).clamp(min=1).float()[:, None, None]
@@ -392,16 +434,36 @@ def random_resized_crop_batch(
 
     y_norm = (y_pix / max(h - 1, 1)) * 2.0 - 1.0
     x_norm = (x_pix / max(w - 1, 1)) * 2.0 - 1.0
-    grid = torch.stack([x_norm, y_norm], dim=-1)  # (B,OH,OW,2)
+    grid = torch.stack([x_norm, y_norm], dim=-1)
 
-    y = F.grid_sample(x, grid, mode="bilinear", padding_mode="zeros", align_corners=True)
-    y = y.clamp(0.0, 1.0)
-
+    y = F.grid_sample(x, grid, mode="bilinear", padding_mode="zeros", align_corners=True).clamp(0.0, 1.0)
     return _apply_where(m, y, x)
 
 
 def random_hflip_batch(x: Tensor, p: float = 0.5) -> Tensor:
-    """左右反転（バッチ版）。"""
+    """左右反転を確率適用（バッチ版）。
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        入力画像。shape は (B, C, H, W)。
+    p : float, default=0.5
+        左右反転を適用する確率（各サンプル独立）。
+
+    Returns
+    -------
+    torch.Tensor
+        変換後の画像。shape は (B, C, H, W)。
+
+    Raises
+    ------
+    ValueError
+        p が [0,1] でない場合（内部の乱数マスク生成で検証される）。
+
+    Notes
+    -----
+    - 反転は `torch.flip(..., dims=[3])` を用い、対象サンプルのみ torch.where で差し替える。
+    """
     b = x.shape[0]
     m = _rand_bool_mask(b, p, device=x.device)
     if not m.any().item():
@@ -418,10 +480,41 @@ def gaussian_blur_batch(
     sigma_max: float = 2.0,
     p: float = 1.0,
 ) -> Tensor:
-    """Gaussian blur（バッチ版・sigma を各サンプル独立にしてもベクトル化）。
+    """Gaussian blur を確率適用（バッチ版、サンプルごとに sigma をランダム化）。
 
-    TF版に合わせて separable depthwise conv（水平→垂直）で実装する。
-    各サンプルで sigma が異なるため (B*C) groups の grouped conv で一括処理する。
+    サンプルごとに sigma を一様サンプリングし、depthwise conv（groups=b*c）で
+    分離可能な 1 次元カーネル（水平→垂直）として畳み込みを行う。
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        入力画像。shape は (B, C, H, W)、値域は [0,1] を想定する。
+    kernel_size : int
+        カーネルサイズ。偶数が与えられた場合は +1 して奇数に丸める。
+    sigma_min : float, default=0.1
+        sigma の下限。
+    sigma_max : float, default=2.0
+        sigma の上限。
+    p : float, default=1.0
+        blur を適用する確率（各サンプル独立）。
+
+    Returns
+    -------
+    torch.Tensor
+        変換後の画像。shape は (B, C, H, W)。値域は [0,1] にクリップされる。
+
+    Raises
+    ------
+    ValueError
+        kernel_size < 1 の場合。
+    ValueError
+        p が [0,1] でない場合（内部の乱数マスク生成で検証される）。
+
+    Notes
+    -----
+    - サンプルごとに異なるカーネルを持つため、入力を (1, B*C, H, W) に reshape し、
+      groups=B*C の depthwise conv として処理する。
+    - 出力は対象サンプルのみ差し替える（torch.where）。
     """
     b, c, h, w = x.shape
     device = x.device
@@ -439,15 +532,15 @@ def gaussian_blur_batch(
 
     sigma = torch.empty((b,), device=device).uniform_(float(sigma_min), float(sigma_max))
 
-    xs = torch.arange(-radius, radius + 1, device=device).float()[None, :]  # (1,K)
+    xs = torch.arange(-radius, radius + 1, device=device).float()[None, :]
     sig = sigma[:, None].clamp(min=1e-6)
     ker = torch.exp(-(xs**2) / (2.0 * (sig**2)))
     ker = ker / ker.sum(dim=1, keepdim=True)
 
     inp = x.reshape(1, b * c, h, w)
 
-    ker_h = ker[:, None, None, :].repeat_interleave(c, dim=0)  # (B*C,1,1,K)
-    ker_v = ker[:, None, :, None].repeat_interleave(c, dim=0)  # (B*C,1,K,1)
+    ker_h = ker[:, None, None, :].repeat_interleave(c, dim=0)
+    ker_v = ker[:, None, :, None].repeat_interleave(c, dim=0)
 
     pad = radius
     out = F.conv2d(inp, ker_h, bias=None, stride=1, padding=(0, pad), groups=b * c)
@@ -461,23 +554,53 @@ def gaussian_blur_batch(
 # Public preprocess API (batch)
 # -------------------------
 def preprocess_for_train_batch(x: Tensor, cfg: SimCLRAugConfig) -> Tensor:
-    """学習時の前処理（バッチ版）。"""
+    """学習時の前処理（バッチ版）。
+
+    入力を float / [0,1] / (B,3,H,W) に正規化した上で、設定に応じて以下を適用する。
+    - random resized crop（常に適用）
+    - random horizontal flip（p=0.5）
+    - color distortion（常に適用、内部で jitter/grayscale は確率）
+    - Gaussian blur（cfg.blur_prob で確率適用）
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        入力画像。uint8 (0..255) または float を許容する。
+        shape は (B, 3, H, W)。
+    cfg : SimCLRAugConfig
+        前処理設定。
+
+    Returns
+    -------
+    torch.Tensor
+        前処理後の画像。shape は (B, 3, cfg.out_h, cfg.out_w)。
+        値域は [0,1] にクリップされる。
+
+    Raises
+    ------
+    TypeError
+        x が torch.Tensor でない場合。
+    ValueError
+        - x が 4 次元でない場合、または C!=3 の場合（内部の正規化関数で検証される）
+        - cfg.impl が未サポートの場合
+
+    Notes
+    -----
+    - 乱数は内部で torch.rand / torch.randperm を用いるため、再現性は RNG 状態に依存する。
+      DataLoader worker や torch.manual_seed の設定と合わせて管理すること。
+    - 前処理は dtype/device の変換を最小限にし、出力は float32 を基本とする。
+    """
     x = _as_float01_bchw(x)
+
+    if cfg.impl not in ("simclrv1", "simclrv2"):
+        raise ValueError(f"Unknown cfg.impl: {cfg.impl}")
 
     if cfg.crop:
         x = random_resized_crop_batch(x, out_h=cfg.out_h, out_w=cfg.out_w, p=1.0)
-
     if cfg.flip:
         x = random_hflip_batch(x, p=0.5)
-
     if cfg.color_distort:
-        x = random_color_jitter_batch(
-            x,
-            strength=cfg.color_jitter_strength,
-            impl=cfg.impl,
-            p=1.0,
-        )
-
+        x = random_color_distort_batch(x, strength=cfg.color_jitter_strength, impl=cfg.impl, p=1.0)
     if cfg.blur:
         x = gaussian_blur_batch(
             x,
@@ -491,57 +614,40 @@ def preprocess_for_train_batch(x: Tensor, cfg: SimCLRAugConfig) -> Tensor:
 
 
 def preprocess_for_eval_batch(x: Tensor, cfg: SimCLRAugConfig, *, crop: bool = True) -> Tensor:
-    """評価時の前処理（バッチ版）。"""
-    x = _as_float01_bchw(x)
+    """評価時の前処理（バッチ版）。
 
-    if crop:
-        x = _center_crop_and_resize_batch(x, cfg.out_h, cfg.out_w, CROP_PROPORTION)
-    else:
-        x = F.interpolate(x, size=(cfg.out_h, cfg.out_w), mode="bicubic", align_corners=False)
-
-    return x.clamp(0.0, 1.0)
-
-
-def preprocess_image_batch(
-    x: Tensor,
-    cfg: SimCLRAugConfig,
-    *,
-    is_training: bool,
-    color_distort: bool = True,
-    test_crop: bool = True,
-) -> Tensor:
-    """TF版 preprocess_image 相当（バッチ版）。
+    学習時のような確率的拡張は行わず、指定解像度へ整形する。
+    crop=True の場合は center crop + resize、crop=False の場合は単純な resize を行う。
 
     Parameters
     ----------
     x : torch.Tensor
-        入力。x # (B, 3, H, W)
+        入力画像。uint8 (0..255) または float を許容する。
+        shape は (B, 3, H, W)。
     cfg : SimCLRAugConfig
-        前処理設定。
-    is_training : bool
-        学習用かどうか。
-    color_distort : bool, default=True
-        学習時の color jitter を有効にするか（cfg.color_distort を上書き）。
-    test_crop : bool, default=True
-        評価時の center crop を行うか。
+        前処理設定（out_h/out_w を使用）。
+    crop : bool, default=True
+        True の場合は center crop + resize、False の場合は resize のみ。
 
     Returns
     -------
     torch.Tensor
-        前処理済みテンソル。y # (B, 3, out_h, out_w), range [0,1]
-    """
-    if is_training:
-        cfg2 = SimCLRAugConfig(
-            out_h=cfg.out_h,
-            out_w=cfg.out_w,
-            color_jitter_strength=cfg.color_jitter_strength,
-            impl=cfg.impl,
-            crop=cfg.crop,
-            flip=cfg.flip,
-            color_distort=bool(color_distort),
-            blur=cfg.blur,
-            blur_prob=cfg.blur_prob,
-        )
-        return preprocess_for_train_batch(x, cfg2)
+        整形後の画像。shape は (B, 3, cfg.out_h, cfg.out_w)。
+        値域は [0,1] にクリップされる。
 
-    return preprocess_for_eval_batch(x, cfg, crop=bool(test_crop))
+    Raises
+    ------
+    TypeError
+        x が torch.Tensor でない場合。
+    ValueError
+        x が 4 次元でない場合、または C!=3 の場合（内部の正規化関数で検証される）。
+
+    Notes
+    -----
+    - center crop の crop_proportion は固定値（CROP_PROPORTION）を用いる。
+    - resize は bicubic を用い、align_corners=False で実行する。
+    """
+    x = _as_float01_bchw(x)
+    if crop:
+        return _center_crop_and_resize_batch(x, cfg.out_h, cfg.out_w, CROP_PROPORTION)
+    return F.interpolate(x, size=(cfg.out_h, cfg.out_w), mode="bicubic", align_corners=False).clamp(0.0, 1.0)

@@ -10,191 +10,97 @@ from torch import Tensor
 
 StemMode: TypeAlias = Literal["auto", "imagenet", "cifar"]
 
-class LayerNorm2d(nn.Module):
-    """2次元特徴マップ（NCHW）向けの LayerNorm。
-
-    Conv2d 出力のような NCHW テンソルに対し、各空間位置 (h, w) ごとに
-    **チャネル次元 C のみ**を正規化する LayerNorm を提供する。
-
-    Notes
-    -----
-    - PyTorch の ``nn.LayerNorm(normalized_shape=C)`` は入力の「最後の次元」を正規化する。
-      そのため NCHW のままでは適用できない（最後の次元が W になってしまう）。
-      本クラスでは ``permute`` により NCHW -> NHWC に変換し、LN を適用してから元に戻す。
-
-    Shapes
-    ------
-    - Input:  x # (B, C, H, W)
-    - Output: y # (B, C, H, W)
-
-    Parameters
-    ----------
-    num_channels : int
-        正規化するチャネル数 C。
-    eps : float, default=1e-5
-        数値安定化項。
-    elementwise_affine : bool, default=True
-        学習可能な affine（scale/bias）を持つかどうか。
-    device : torch.device | str | int | None, default=None
-        パラメータを配置するデバイス。None の場合は PyTorch のデフォルトに従う。
-    dtype : torch.dtype | None, default=None
-        パラメータの dtype。None の場合は PyTorch のデフォルトに従う。
-
-    Raises
-    ------
-    ValueError
-        num_channels < 1、eps <= 0、または forward 入力が 4 次元でない場合。
-    """
-
-    def __init__(
-        self,
-        num_channels: int,
-        eps: float = 1e-5,
-        elementwise_affine: bool = True,
-        *,
-        device: torch.device | str | int | None = None,
-        dtype: torch.dtype | None = None,
-    ) -> None:
-        super().__init__()
-        if int(num_channels) < 1:
-            raise ValueError(f"num_channels は 1 以上である必要があります: got {num_channels}")
-        if float(eps) <= 0.0:
-            raise ValueError(f"eps は正である必要があります: got {eps}")
-
-        self.ln = nn.LayerNorm(
-            num_channels,
-            eps=eps,
-            elementwise_affine=bool(elementwise_affine),
-            device=device,
-            dtype=dtype
-        )
-
-    def forward(self, x: Tensor) -> Tensor:
-        """LayerNorm を適用する。
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            入力テンソル。x # (B, C, H, W)
-
-        Returns
-        -------
-        torch.Tensor
-            正規化後テンソル。y # (B, C, H, W)
-
-        Raises
-        ------
-        ValueError
-            x が 4 次元でない場合。
-        """
-        if x.ndim != 4:
-            raise ValueError(f"x は 4 次元 (B,C,H,W) である必要があります: got shape={tuple(x.shape)}")
-
-        # x # (B, C, H, W) -> (B, H, W, C)
-        x = x.permute(0, 2, 3, 1)
-        x = self.ln(x)
-        # x # (B, H, W, C) -> (B, C, H, W)
-        x = x.permute(0, 3, 1, 2)
-        return x
-
 
 @dataclass(frozen=True)
 class ResNet50EncoderConfig:
-    """ResNet-50 Encoder 設定（SimCLR 用に encoder のみ使う想定）。
+    """ResNet-50 Encoder の設定。
+
+    SimCLR 等で用いる「分類ヘッドを除いた ResNet-50 の特徴抽出器」を構成するための
+    ハイパーパラメータ（入力形状、stem 形状、BatchNorm 設定）を保持する。
+
+    本設定は **出力特徴次元を 2048（layer4 後の global average pooling）** とする
+    ResNet-50 の標準構成に対応する。
 
     Parameters
     ----------
     input_size : tuple[int, int, int], default=(3, 256, 256)
-        入力画像サイズ (C,H,W)。
-        allow_any_spatial=False の場合、forward で (C,H,W) 一致を検証する。
-    stem : {"auto","imagenet","cifar"}, default="auto"
+        入力画像サイズ (C, H, W)。
+        本実装は RGB 入力を前提とするため C=3 を要求する。
+
+        allow_any_spatial=False の場合、forward で (H, W) の一致を厳格に検証する。
+    stem : {"auto", "imagenet", "cifar"}, default="auto"
         Stem の種別。
-        - "imagenet": 7x7 stride2 + maxpool stride2（標準 ResNet）
+
+        - "imagenet": 7x7 stride2 + maxpool（ImageNet 標準 ResNet stem）
         - "cifar":    3x3 stride1 + maxpool なし（小解像度向け）
-        - "auto":     min(H,W) <= 64 なら "cifar"、それ以外は "imagenet"
+        - "auto":     min(H, W) <= 64 なら "cifar"、それ以外は "imagenet"
     allow_any_spatial : bool, default=False
-        True の場合、(H,W) の厳格チェックを無効化（C=3 のみ検証）。
+        True の場合、(H, W) の厳格チェックを無効化し、(C=3) のみ検証する
+        （可変解像度入力を許容する）。
     eps : float, default=1e-5
-        LayerNorm の eps。
+        BatchNorm2d の eps（分散に加える微小値）。数値安定性のため正値を要求する。
+    bn_momentum : float, default=0.1
+        BatchNorm2d の momentum（running mean/var の更新係数）。
+        通常は 0 < momentum < 1 を推奨する。
 
     Notes
     -----
-    - デフォルトは (3,256,256) + stem="auto" なので実質 "imagenet" stem となり、
-      既存の「256 前提」挙動を維持する。
-    - CIFAR-10 等で使う場合は input_size=(3,32,32), stem="auto" で "cifar" stem が選ばれる。
+    - 出力特徴次元は ResNet-50 の最終段（layer4）後の global average pooling のため 2048。
+    - CIFAR-10 等の小解像度では input_size=(3, 32, 32), stem="auto" で "cifar" stem が選択される。
+    - allow_any_spatial=True を用いる場合でも、stem と各 stage の stride により
+      極端に小さい入力では空間次元が潰れる可能性があるため、実運用では入力解像度の下限を別途設けること。
     """
-
     input_size: tuple[int, int, int] = (3, 256, 256)
     stem: StemMode = "auto"
     allow_any_spatial: bool = False
     eps: float = 1e-5
+    bn_momentum: float = 0.1
 
 
 class ResNet50Encoder(nn.Module):
-    """ResNet-50 Encoder（timm Bottleneck 使用）。
+    """ResNet-50 Encoder（timm の Bottleneck を用いた特徴抽出器）。
 
-    目的
-    ----
-    入力画像
-        x ∈ R^{B×3×H×W}
-    を特徴ベクトル
-        z ∈ R^{B×2048}
-    に写像する encoder を提供する。
+    分類器（fc）を持たず、最終 stage（layer4）後の global average pooling により
+    画像を固定次元ベクトルへ写像する。SimCLR では encoder の出力に projection head を
+    接続して対照学習を行うため、本クラスは「encoder 部分のみ」を提供する。
 
-    実装方針
-    --------
-    - 残差ブロックは timm.models.resnet.Bottleneck を使用する。:contentReference[oaicite:3]{index=3}
-    - 正規化は LayerNorm2d を用い、timm Bottleneck の norm_layer 引数に渡す。
-      timm Bottleneck は norm_layer(ch) を呼び出す設計であるため、LayerNorm2d はその契約を満たす。:contentReference[oaicite:4]{index=4}
-    - 出力は global average pooling の後に LayerNorm(2048)。
+    ResNet-50 の段構成は [3, 4, 6, 3]（stage1..4 の Bottleneck ブロック数）であり、
+    timm の `Bottleneck` ブロックを用いて手動で組み立てる。
 
-    Parameters
+    Attributes
     ----------
-    cfg : ResNet50EncoderConfig | None, default=None
-        Encoder 設定。
+    cfg : ResNet50EncoderConfig
+        設定。
+    out_dim : int
+        出力特徴次元（常に 2048）。
 
-    Returns
-    -------
-    z : torch.Tensor
-        shape=(B, 2048) の特徴ベクトル。
-
-    Raises
-    ------
-    TypeError
-        入力が torch.Tensor でない場合。
-    ValueError
-        入力 shape が不正、または cfg の前提に反する場合。
+    Notes
+    -----
+    - 入力は (B, C, H, W) の 4 次元テンソルを想定し、C=3 を要求する。
+    - stem="imagenet" は stride=2 + maxpool により初段で強くダウンサンプリングするため、
+      小解像度（例: 32x32）では情報落ちが大きい。小解像度では stem="cifar" が適する。
+    - BatchNorm を用いる。小バッチでは統計が不安定になり得るため、必要に応じて
+      (i) バッチを大きくする / (ii) SyncBN / (iii) BN の凍結等を検討する。
+    - 本クラスは重みの一部のみ（Conv）に Kaiming 初期化を適用し、BN 等は PyTorch の
+      デフォルト初期化に委ねる（`_init_weights()` 参照）。
     """
+    out_dim: int = 2048
 
     def __init__(self, cfg: ResNet50EncoderConfig | None = None) -> None:
         super().__init__()
         self.cfg = cfg or ResNet50EncoderConfig()
 
         c, h, w = self.cfg.input_size
-        if int(c) != 3:
+        if c != 3:
             raise ValueError(f"ResNet50Encoder は RGB (C=3) 前提です: got C={c}")
-        if int(h) < 8 or int(w) < 8:
+        if h < 8 or w < 8:
             raise ValueError(f"(H,W) は十分大きい必要があります: got (H,W)=({h},{w})")
-        if float(self.cfg.eps) <= 0.0:
+        if self.cfg.eps <= 0.0:
             raise ValueError(f"eps は正である必要があります: got {self.cfg.eps}")
+        if not (0.0 < self.cfg.bn_momentum < 1.0):
+            raise ValueError(f"bn_momentum は (0,1) が推奨です: got {self.cfg.bn_momentum}")
 
-        # stem mode
-        if self.cfg.stem == "imagenet":
-            stem_mode: Literal["imagenet", "cifar"] = "imagenet"
-        elif self.cfg.stem == "cifar":
-            stem_mode = "cifar"
-        elif self.cfg.stem == "auto":
-            stem_mode = "cifar" if min(int(h), int(w)) <= 64 else "imagenet"
-        else:
-            raise ValueError(f"未サポートの stem: {self.cfg.stem}")
-
-        # norm/act factories for timm Bottleneck
-        # Bottleneck(..., act_layer=nn.ReLU, norm_layer=nn.BatchNorm2d) のように渡される設計。
-        self._act_layer = nn.ReLU
-        def _norm_layer(ch: int, *, device: torch.device | None = None, dtype: torch.dtype | None = None, **_: object) -> nn.Module:
-            return LayerNorm2d(int(ch), eps=self.cfg.eps, device=device, dtype=dtype)
-        
-        self._norm_layer = _norm_layer
+        stem_mode = self._resolve_stem_mode(stem=self.cfg.stem, h=h, w=w)
 
         # ---- Stem ----
         if stem_mode == "imagenet":
@@ -203,13 +109,12 @@ class ResNet50Encoder(nn.Module):
             self.act1 = nn.ReLU(inplace=True)
             self.maxpool: nn.Module = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         else:
-            # CIFAR 向け：序盤で潰しすぎない
             self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
             self.norm1 = self._norm_layer(64)
             self.act1 = nn.ReLU(inplace=True)
             self.maxpool = nn.Identity()
 
-        # ---- Stages (ResNet-50): [3,4,6,3] ----
+        # ---- Stages (ResNet-50): [3, 4, 6, 3] ----
         self._inplanes = 64
         self.layer1 = self._make_layer(planes=64, blocks=3, stride=1)
         self.layer2 = self._make_layer(planes=128, blocks=4, stride=2)
@@ -217,22 +122,45 @@ class ResNet50Encoder(nn.Module):
         self.layer4 = self._make_layer(planes=512, blocks=3, stride=2)
 
         self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.out_norm = nn.LayerNorm(2048, eps=self.cfg.eps)
+
+        self._init_weights()
+
+    @staticmethod
+    def _resolve_stem_mode(*, stem: StemMode, h: int, w: int) -> Literal["imagenet", "cifar"]:
+        if stem == "imagenet":
+            return "imagenet"
+        if stem == "cifar":
+            return "cifar"
+        if stem == "auto":
+            return "cifar" if min(h, w) <= 64 else "imagenet"
+        # Literal 的には到達不能だが、fail-fast のため明示
+        raise ValueError(f"未サポートの stem: {stem}")
+
+    def _norm_layer(self, ch: int, **_: object) -> nn.Module:
+        if int(ch) < 1:
+            raise ValueError(f"ch は 1 以上である必要があります: got {ch}")
+        return nn.BatchNorm2d(
+            int(ch),
+            eps=float(self.cfg.eps),
+            momentum=float(self.cfg.bn_momentum),
+            affine=True,
+            track_running_stats=True,
+        )
 
     def _make_layer(self, *, planes: int, blocks: int, stride: int) -> nn.Sequential:
-        if int(planes) < 1:
+        if planes < 1:
             raise ValueError(f"planes は 1 以上である必要があります: got {planes}")
-        if int(blocks) < 1:
+        if blocks < 1:
             raise ValueError(f"blocks は 1 以上である必要があります: got {blocks}")
-        if int(stride) not in (1, 2):
+        if stride not in (1, 2):
             raise ValueError(f"stride は 1 または 2 を想定します: got {stride}")
 
-        outplanes = int(planes) * Bottleneck.expansion  # timm Bottleneck.expansion = 4
+        outplanes = planes * Bottleneck.expansion
 
         downsample: nn.Module | None = None
         if stride != 1 or self._inplanes != outplanes:
             downsample = nn.Sequential(
-                nn.Conv2d(self._inplanes, outplanes, kernel_size=1, stride=int(stride), bias=False),
+                nn.Conv2d(self._inplanes, outplanes, kernel_size=1, stride=stride, bias=False),
                 self._norm_layer(outplanes),
             )
 
@@ -240,40 +168,79 @@ class ResNet50Encoder(nn.Module):
         layers.append(
             Bottleneck(
                 self._inplanes,
-                int(planes),
-                stride=int(stride),
+                planes,
+                stride=stride,
                 downsample=downsample,
-                act_layer=self._act_layer,
+                act_layer=nn.ReLU,
                 norm_layer=self._norm_layer, # type: ignore
             )
         )
         self._inplanes = outplanes
 
-        for _ in range(int(blocks) - 1):
+        for _ in range(blocks - 1):
             layers.append(
                 Bottleneck(
                     self._inplanes,
-                    int(planes),
+                    planes,
                     stride=1,
                     downsample=None,
-                    act_layer=self._act_layer,
+                    act_layer=nn.ReLU,
                     norm_layer=self._norm_layer, # type: ignore
                 )
             )
 
         return nn.Sequential(*layers)
 
+    def _init_weights(self) -> None:
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
     def forward(self, x: Tensor) -> Tensor:
-        if not isinstance(x, torch.Tensor):  # type: ignore
-            raise TypeError(f"x must be torch.Tensor. got {type(x)}")
+        """前向き計算（特徴抽出）。
+
+        入力画像を stem → stage1..4 → global average pooling に通し、固定次元ベクトルを返す。
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            入力テンソル。shape は (B, C, H, W)。
+            dtype は浮動小数点（例: float32 / bfloat16 / float16）を想定する。
+
+        Returns
+        -------
+        torch.Tensor
+            特徴ベクトル。shape は (B, 2048)。
+
+        Raises
+        ------
+        TypeError
+            x が torch.Tensor でない場合。
+        ValueError
+            - x が 4 次元でない場合
+            - C が `cfg.input_size[0]` と一致しない場合
+            - allow_any_spatial=False で (H, W) が `cfg.input_size[1:3]` と一致しない場合
+
+        Notes
+        -----
+        - allow_any_spatial=True のときは (H, W) の検証を行わず、可変解像度入力を許容する。
+        ただし stem と各 stage の stride により、極端に小さい入力では空間次元が潰れる可能性があるため、
+        実運用では入力解像度の下限を別途管理すること。
+        - 本メソッドは device/dtype の移動を行わない（呼び出し側で `to(device)` 等を行う）。
+        - 出力は global average pooling 後に `torch.flatten(x, 1)` で (B, 2048) に整形される。
+        """
+        if not isinstance(x, torch.Tensor): # type: ignore
+            raise TypeError(f"x must be torch.Tensor. got {type(x).__name__}")
         if x.ndim != 4:
             raise ValueError(f"x は 4 次元 (B,C,H,W) が必要です: got shape={tuple(x.shape)}")
 
         c, h, w = self.cfg.input_size
-        if x.shape[1] != int(c):
+        if x.shape[1] != c:
             raise ValueError(f"入力チャネル不一致: expected C={c}, got C={x.shape[1]}")
         if not self.cfg.allow_any_spatial:
-            if (x.shape[2], x.shape[3]) != (int(h), int(w)):
+            if (x.shape[2], x.shape[3]) != (h, w):
                 raise ValueError(
                     f"入力空間サイズ不一致: expected (H,W)=({h},{w}), got (H,W)=({x.shape[2]},{x.shape[3]})"
                 )
@@ -289,6 +256,5 @@ class ResNet50Encoder(nn.Module):
         x = self.layer4(x)
 
         x = self.global_pool(x)
-        x = torch.flatten(x, 1)  # (B, 2048)
-        x = self.out_norm(x)
+        x = torch.flatten(x, 1)
         return x
