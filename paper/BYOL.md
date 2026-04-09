@@ -2,209 +2,214 @@
 
 ## Abstract
 
-We introduce Bootstrap Your Own Latent (BYOL), a new approach to self-supervised image representation learning. BYOL relies on two neural networks, referred to as online and target networks, that interact and learn from each other. From an augmented view of an image, we train the online network to predict the target network representation of the same image under a different augmented view. At the same time, we update the target network with a slow-moving average of the online network. While state-of-the art methods rely on negative pairs, BYOL achieves a new state of the art without them. BYOL reaches 74.3% top-1 classification accuracy on ImageNet using a linear evaluation with a ResNet-50 architecture and 79.6% with a larger ResNet. We show that BYOL performs on par or better than the current state of the art on both transfer and semi-supervised benchmarks. Our implementation and pretrained models are given on GitHub.
+私たちは **Bootstrap Your Own Latent（BYOL）** を提案する。これは、自己教師あり画像表現学習のための新しい手法である。BYOL は、**オンラインネットワーク** と **ターゲットネットワーク** と呼ばれる 2 つのニューラルネットワークに基づいており、これらが相互に作用しながら学習する。画像のある拡張ビューから、同じ画像の別の拡張ビューに対するターゲットネットワークの表現を、オンラインネットワークが予測するように学習を行う。同時に、ターゲットネットワークはオンラインネットワークの重みのゆっくりとした移動平均によって更新される。最先端の手法が負例ペアに依存しているのに対し、BYOL はそれらを用いずに新たな最先端性能を達成する。BYOL は、ResNet-50 アーキテクチャを用いた線形評価において ImageNet で **74.3%** の top-1 分類精度を達成し、より大規模な ResNet では **79.6%** を達成する。さらに、BYOL が転移学習および半教師あり学習の両ベンチマークにおいて、当時の最先端手法と同等以上の性能を示すことを明らかにする。実装および事前学習済みモデルは GitHub で公開している。
 
 ## 1. Introduction
 
-Learning good image representations is a key challenge in computer vision [1, 2, 3] as it allows for efficient training on downstream tasks [4, 5, 6, 7]. Many different training approaches have been proposed to learn such representations, usually relying on visual pretext tasks. Among them, state-of-the-art contrastive methods [8, 9, 10, 11, 12] are trained by reducing the distance between representations of different augmented views of the same image (‘positive pairs’), and increasing the distance between representations of augmented views from different images (‘negative pairs’). These methods need careful treatment of negative pairs [13] by either relying on large batch sizes [8, 12], memory banks [9] or customized mining strategies [14, 15] to retrieve the negative pairs. In addition, their performance critically depends on the choice of image augmentations [8, 12].
+良い画像表現を学習することは、コンピュータビジョンにおける重要な課題である [1, 2, 3]。なぜなら、それにより下流タスク [4, 5, 6, 7] に対する効率的な学習が可能になるからである。こうした表現を学習するために、多様な学習手法が提案されてきたが、通常は視覚的なプレテキストタスクに依存している。その中でも、最先端のコントラスト学習法 [8, 9, 10, 11, 12] は、同じ画像の異なる拡張ビューの表現どうし（「正例ペア」）の距離を縮め、異なる画像の拡張ビューの表現どうし（「負例ペア」）の距離を広げることで学習される。これらの手法では、負例ペアの扱いに注意が必要であり [13]、大きなバッチサイズ [8, 12]、メモリバンク [9]、あるいは負例ペアを取得するための専用のマイニング戦略 [14, 15] に依存している。さらに、その性能は画像拡張の選び方に強く依存する [8, 12]。
 
-In this paper, we introduce Bootstrap Your Own Latent (BYOL), a new algorithm for self-supervised learning of image representations. BYOL achieves higher performance than state-of-the-art contrastive methods without using negative pairs. It iteratively bootstraps the outputs of a network to serve as targets for an enhanced representation. Moreover, BYOL is more robust to the choice of image augmentations than contrastive methods; we suspect that not relying on negative pairs is one of the leading reasons for its improved robustness. While previous methods based on bootstrapping have used pseudo-labels [16], cluster indices [17] or a handful of labels [18, 19, 20], we propose to directly bootstrap the representations. In particular, BYOL uses two neural networks, referred to as online and target networks, that interact and learn from each other. Starting from an augmented view of an image, BYOL trains its online network to predict the target network’s representation of another augmented view of the same image. While this objective admits collapsed solutions, e.g., outputting the same vector for all images, we empirically show that BYOL does not converge to such solutions. We hypothesize (see Section 3.2) that the combination of (i) the addition of a predictor to the online network and (ii) the use of a slow-moving average of the online parameters as the target network encourages encoding more and more information within the online projection and avoids collapsed solutions.
+本論文では、画像表現の自己教師あり学習のための新しいアルゴリズム **Bootstrap Your Own Latent（BYOL）** を導入する。BYOL は、負例ペアを用いることなく、最先端のコントラスト学習法を上回る性能を達成する。BYOL は、ネットワークの出力を反復的にブートストラップし、それをより良い表現のためのターゲットとして用いる。さらに、BYOL はコントラスト学習法よりも画像拡張の選択に対して頑健である。私たちは、負例ペアに依存しないことが、その頑健性向上の主な理由の一つであると考えている。これまでのブートストラップに基づく手法では、疑似ラベル [16]、クラスタインデックス [17]、あるいは少数のラベル [18, 19, 20] が用いられてきたが、私たちは表現そのものを直接ブートストラップすることを提案する。具体的には、BYOL は **オンラインネットワーク** と **ターゲットネットワーク** と呼ばれる 2 つのニューラルネットワークを用い、それらが相互作用しながら学習する。ある画像の拡張ビューから出発し、BYOL は同じ画像の別の拡張ビューに対するターゲットネットワークの表現を予測するように、オンラインネットワークを学習させる。この目的関数は、たとえばすべての画像に対して同じベクトルを出力するような崩壊解を許しうるが、私たちは実験的に、BYOL がそのような解に収束しないことを示す。私たちは、(i) オンラインネットワークに予測器を追加すること、(ii) オンラインパラメータのゆっくりとした移動平均をターゲットネットワークとして用いること、という 2 つの組合せが、オンライン射影の中により多くの情報を符号化することを促し、崩壊解を回避しているのではないかと仮定している（3.2 節参照）。
 
-We evaluate the representation learned by BYOL on ImageNet [21] and other vision benchmarks using ResNet architectures [22]. Under the linear evaluation protocol on ImageNet, consisting in training a linear classifier on top of the frozen representation, BYOL reaches 74.3% top-1 accuracy with a standard ResNet-50 and 79.6% top-1 accuracy with a larger ResNet (Figure 1). In the semi-supervised and transfer settings on ImageNet, we obtain results on par or superior to the current state of the art. Our contributions are: (i) We introduce BYOL, a self-supervised representation learning method (Section 3) which achieves state-of-the-art results under the linear evaluation protocol on ImageNet without using negative pairs. (ii) We show that our learned representation outperforms the state of the art on semi-supervised and transfer benchmarks (Section 4). (iii) We show that BYOL is more resilient to changes in the batch size and in the set of image augmentations compared to its contrastive counterparts (Section 5). In particular, BYOL suffers a much smaller performance drop than SimCLR, a strong contrastive baseline, when only using random crops as image augmentations.
+私たちは、BYOL によって学習された表現を、ResNet アーキテクチャ [22] を用いて ImageNet [21] および他の視覚ベンチマークで評価する。凍結した表現の上に線形分類器を学習する ImageNet の線形評価プロトコルの下で、BYOL は標準的な ResNet-50 で **74.3%** の top-1 精度、大規模な ResNet で **79.6%** の top-1 精度を達成する（図 1）。ImageNet における半教師あり設定および転移学習設定でも、私たちは当時の最先端と同等またはそれを上回る結果を得た。私たちの貢献は次のとおりである。(i) 負例ペアを用いることなく、ImageNet の線形評価プロトコルにおいて最先端の結果を達成する自己教師あり表現学習法 BYOL を提案した（3 節）。(ii) 学習された表現が、半教師ありおよび転移学習ベンチマークにおいて最先端を上回ることを示した（4 節）。(iii) BYOL が、コントラスト学習法と比較して、バッチサイズや画像拡張の組合せの変化に対してより頑健であることを示した（5 節）。特に、画像拡張としてランダムクロップのみを用いた場合でも、BYOL は強力なコントラスト学習ベースラインである SimCLR よりも、はるかに小さな性能低下しか示さない。
 
 ![](../images/byol_fig1.png)
-Figure 1: Performance of BYOL on ImageNet (linear evaluation) using ResNet-50 and our best architecture ResNet200 (2×), compared to other unsupervised and supervised (Sup.) baselines [8].
+図 1：ImageNet における BYOL の性能（線形評価）。ResNet-50 および私たちの最良アーキテクチャである ResNet200（2×）を用いた結果を、他の教師なし手法および教師あり（Sup.）ベースライン [8] と比較したもの。
 
 ## 2. Related work
 
-Most unsupervised methods for representation learning can be categorized as either generative or discriminative [23, 8]. Generative approaches to representation learning build a distribution over data and latent embedding and use the learned embeddings as image representations. Many of these approaches rely either on auto-encoding of images [24, 25, 26] or on adversarial learning [27], jointly modelling data and representation [28, 29, 30, 31]. Generative methods typically operate directly in pixel space. This however is computationally expensive, and the high level of detail required for image generation may not be necessary for representation learning.
+表現学習のための多くの教師なし手法は、**生成的手法**または**識別的手法**のいずれかに分類できる [23, 8]。生成的な表現学習手法は、データと潜在埋め込みの上に分布を構築し、学習された埋め込みを画像表現として利用する。これらの多くは、画像のオートエンコーディング [24, 25, 26]、あるいは敵対的学習 [27] に依存し、データと表現を同時にモデリングしている [28, 29, 30, 31]。生成的手法は通常、直接ピクセル空間で動作する。しかしこれは計算コストが高く、また画像生成に必要とされる高レベルの詳細さは、表現学習には必ずしも必要ではない可能性がある。
 
-Among discriminative methods, contrastive methods [9, 10, 32, 33, 34, 11, 35, 36] currently achieve state-of-the-art performance in self-supervised learning [37, 8, 38, 12]. Contrastive approaches avoid a costly generation step in pixel space by bringing representation of different views of the same image closer (‘positive pairs’), and spreading representations of views from different images (‘negative pairs’) apart [39, 40]. Contrastive methods often require comparing each example with many other examples to work well [9, 8] prompting the question of whether using negative pairs is necessary.
+識別的手法の中では、コントラスト学習法 [9, 10, 32, 33, 34, 11, 35, 36] が現在、自己教師あり学習において最先端の性能を達成している [37, 8, 38, 12]。コントラスト学習法は、同じ画像の異なるビューの表現を近づけ（「正例ペア」）、異なる画像のビューの表現を遠ざける（「負例ペア」）ことで、ピクセル空間でのコストの高い生成ステップを回避する [39, 40]。コントラスト学習法がうまく機能するためには、しばしば各サンプルを多数の他サンプルと比較する必要があり [9, 8]、そこから「負例ペアの利用は本当に必要なのか」という疑問が生じる。
 
-DeepCluster [17] partially answers this question. It uses bootstrapping on previous versions of its representation to produce targets for the next representation; it clusters data points using the prior representation, and uses the cluster index of each sample as a classification target for the new representation. While avoiding the use of negative pairs, this requires a costly clustering phase and specific precautions to avoid collapsing to trivial solutions.
+DeepCluster [17] は、この問いに部分的な答えを与えている。この手法は、以前の表現をブートストラップして次の表現のためのターゲットを生成する。すなわち、先行する表現を用いてデータ点をクラスタリングし、各サンプルのクラスタインデックスを新しい表現に対する分類ターゲットとして用いる。これは負例ペアの使用を回避している一方で、計算コストの高いクラスタリング段階を必要とし、さらに自明な解への崩壊を避けるための特別な注意も必要となる。
 
-Some self-supervised methods are not contrastive but rely on using auxiliary handcrafted prediction tasks to learn their representation. In particular, relative patch prediction [23, 40], colorizing gray-scale images [41, 42], image inpainting [43], image jigsaw puzzle [44], image super-resolution [45], and geometric transformations [46, 47] have been shown to be useful. Yet, even with suitable architectures [48], these methods are being outperformed by contrastive methods [37, 8, 12].
+一部の自己教師あり手法はコントラスト学習ではないが、補助的な手作業設計の予測タスクを用いて表現を学習する。特に、相対パッチ予測 [23, 40]、グレースケール画像の着色 [41, 42]、画像インペインティング [43]、画像ジグソーパズル [44]、画像超解像 [45]、および幾何変換 [46, 47] が有用であることが示されている。しかし、適切なアーキテクチャを用いたとしても [48]、これらの手法はコントラスト学習法 [37, 8, 12] に性能面で後れを取っている。
 
-Our approach has some similarities with Predictions of Bootstrapped Latents (PBL, [49]), a self-supervised representation learning technique for reinforcement learning (RL). PBL jointly trains the agent’s history representation and an encoding of future observations. The observation encoding is used as a target to train the agent’s representation, and the agent’s representation as a target to train the observation encoding. Unlike PBL, BYOL uses a slow-moving average of its representation to provide its targets, and does not require a second network.
+私たちの手法は、強化学習（RL）のための自己教師あり表現学習法である **Predictions of Bootstrapped Latents（PBL, [49]）** といくつかの類似点を持つ。PBL は、エージェントの履歴表現と将来観測のエンコーディングを同時に学習する。観測エンコーディングはエージェント表現を学習するためのターゲットとして使われ、逆にエージェント表現は観測エンコーディングを学習するためのターゲットとして使われる。PBL と異なり、BYOL は自身の表現のゆっくり移動する平均を用いてターゲットを与え、さらに第 2 のネットワークを必要としない。
 
-The idea of using a slow-moving average target network to produce stable targets for the online network was inspired by deep RL [50, 51, 52, 53]. Target networks stabilize the bootstrapping updates provided by the Bellman equation, making them appealing to stabilize the bootstrap mechanism in BYOL. While most RL methods use fixed target networks, BYOL uses a weighted moving average of previous networks (as in [54]) in order to provide smoother changes in the target representation.
+オンラインネットワークに対して安定したターゲットを生成するために、ゆっくり移動する平均によるターゲットネットワークを用いるというアイデアは、深層強化学習 [50, 51, 52, 53] に着想を得ている。ターゲットネットワークは、ベルマン方程式によって与えられるブートストラップ更新を安定化させるため、BYOL におけるブートストラップ機構の安定化にも有効であると考えられる。ほとんどの強化学習手法が固定されたターゲットネットワークを用いるのに対し、BYOL ではターゲット表現の変化をより滑らかにするために、過去のネットワークの重み付き移動平均（[54] と同様）を用いる。
 
-In the semi-supervised setting [55, 56], an unsupervised loss is combined with a classification loss over a handful of labels to ground the training [19, 20, 57, 58, 59, 60, 61, 62]. Among these methods, mean teacher (MT) [20] also uses a slow-moving average network, called teacher, to produce targets for an online network, called student. An $\ell_2$ consistency loss between the softmax predictions of the teacher and the student is added to the classification loss. While [20] demonstrates the effectiveness of MT in the semi-supervised learning case, in Section 5 we show that a similar approach collapses when removing the classification loss. In contrast, BYOL introduces an additional predictor on top of the online network, which prevents collapse.
+半教師あり設定 [55, 56] では、教師なし損失と少数のラベルに対する分類損失とを組み合わせて学習を安定化させる [19, 20, 57, 58, 59, 60, 61, 62]。これらの手法の中で、**mean teacher（MT）** [20] もまた、**teacher** と呼ばれるゆっくり移動する平均ネットワークを用いて、**student** と呼ばれるオンラインネットワークのターゲットを生成する。teacher と student の softmax 予測の間の $\ell_2$ 一貫性損失が、分類損失に追加される。[20] は半教師あり学習における MT の有効性を示しているが、5 節で示すように、分類損失を取り除くと類似のアプローチは崩壊してしまう。これに対して BYOL は、オンラインネットワークの上に追加の予測器を導入することで、この崩壊を防いでいる。
 
-Finally, in self-supervised learning, MoCo [9] uses a slow-moving average network (momentum encoder) to maintain consistent representations of negative pairs drawn from a memory bank. Instead, BYOL uses a moving average network to produce prediction targets as a means of stabilizing the bootstrap step. We show in Section 5 that this mere stabilizing effect can also improve existing contrastive methods.
+最後に、自己教師あり学習において、MoCo [9] はメモリバンクから取り出される負例ペアの一貫した表現を維持するために、ゆっくり移動する平均ネットワーク（momentum encoder）を用いている。これに対し、BYOL はブートストラップ段階を安定化させる手段として、予測ターゲットを生成するために移動平均ネットワークを用いる。私たちは 5 節で、この単なる安定化効果だけでも既存のコントラスト学習法を改善しうることを示す。
+
 
 ## 3. Method
 
-We start by motivating our method before explaining its details in Section 3.1. Many successful self-supervised learning approaches build upon the cross-view prediction framework introduced in [63]. Typically, these approaches learn representations by predicting different views (e.g., different random crops) of the same image from one another. Many such approaches cast the prediction problem directly in representation space: the representation of an augmented view of an image should be predictive of the representation of another augmented view of the same image. However, predicting directly in representation space can lead to collapsed representations: for instance, a representation that is constant across views is always fully predictive of itself. Contrastive methods circumvent this problem by reformulating the prediction problem into one of discrimination: from the representation of an augmented view, they learn to discriminate between the representation of another augmented view of the same image, and the representations of augmented views of different images. In the vast majority of cases, this prevents the training from finding collapsed representations. Yet, this discriminative approach typically requires comparing each representation of an augmented view with many negative examples, to find ones sufficiently close to make the discrimination task challenging. In this work, we thus tasked ourselves to find out whether these negative examples are indispensable to prevent collapsing while preserving high performance.
+まず、3.1 節で詳細を説明する前に、私たちの手法の動機づけを行う。多くの成功した自己教師あり学習手法は、[63] で導入された **cross-view prediction** の枠組みに基づいている。通常、これらの手法は、同じ画像の異なるビュー（たとえば異なるランダムクロップ）を互いに予測することで表現を学習する。こうした手法の多くは、予測問題を直接**表現空間**で定式化している。すなわち、ある画像の拡張ビューの表現は、同じ画像の別の拡張ビューの表現を予測できるものであるべきだと考える。しかし、表現空間で直接予測を行うと、**崩壊した表現**に至る可能性がある。たとえば、ビューに関係なく一定の表現は、常に自分自身を完全に予測できてしまう。コントラスト学習法は、この問題を**識別問題**へと再定式化することで回避している。すなわち、ある拡張ビューの表現から、同じ画像の別の拡張ビューの表現と、異なる画像の拡張ビューの表現とを識別するように学習する。ほとんどの場合、このことによって学習が崩壊表現に陥るのを防げる。しかし、この識別的アプローチでは通常、識別課題を十分に難しくするために、各拡張ビューの表現を多数の負例と比較する必要がある。そこで本研究では、高い性能を保ちながら崩壊を防ぐために、これらの負例が本当に不可欠なのかを明らかにすることを課題とした。
 
-To prevent collapse, a straightforward solution is to use a fixed randomly initialized network to produce the targets for our predictions. While avoiding collapse, it empirically does not result in very good representations. Nonetheless, it is interesting to note that the representation obtained using this procedure can already be much better than the initial fixed representation. In our ablation study (Section 5), we apply this procedure by predicting a fixed randomly initialized network and achieve 18.8% top-1 accuracy (Table 5a) on the linear evaluation protocol on ImageNet, whereas the randomly initialized network only achieves 1.4% by itself. This experimental finding is the core motivation for BYOL: from a given representation, referred to as target, we can train a new, potentially enhanced representation, referred to as online, by predicting the target representation. From there, we can expect to build a sequence of representations of increasing quality by iterating this procedure, using subsequent online networks as new target networks for further training. In practice, BYOL generalizes this bootstrapping procedure by iteratively refining its representation, but using a slowly moving exponential average of the online network as the target network instead of fixed checkpoints.
+崩壊を防ぐための素直な解決策として、ランダムに初期化した固定ネットワークを用いて予測のターゲットを生成する方法が考えられる。この方法は崩壊を避けられる一方で、経験的にはあまり良い表現にはならない。しかしながら、この手続きによって得られる表現が、初期の固定表現よりもすでにかなり良いものになりうるという点は興味深い。私たちはアブレーション研究（5 節）において、固定されたランダム初期化ネットワークを予測するこの手続きを適用し、ImageNet の線形評価プロトコルにおいて **18.8%** の top-1 精度を達成した（表 5a）。一方、そのランダム初期化ネットワーク自体の精度は **1.4%** にすぎない。この実験結果こそが BYOL の中核的な動機である。すなわち、**ターゲット**と呼ばれるある表現が与えられたとき、そのターゲット表現を予測することで、**オンライン**と呼ばれる新たな、しかもより良い可能性のある表現を学習できる。そこから、この手続きを繰り返し、後続のオンラインネットワークを次のターゲットネットワークとして用いることで、品質が徐々に向上する表現の列を構築できると期待できる。実際には、BYOL はこのブートストラップ手続きを一般化し、固定されたチェックポイントを用いる代わりに、オンラインネットワークの**ゆっくり移動する指数平均**をターゲットネットワークとして用いることで、表現を反復的に洗練していく。
 
 ### 3.1 Description of BYOL
 
-BYOL’s goal is to learn a representation $y_\theta$  which can then be used for downstream tasks. As described previously, BYOL uses two neural networks to learn: the online and target networks. The online network is defined by a set of weights $\theta$ and is comprised of three stages: an encoder $f_\theta$ , a projector $g_\theta$ and a predictor $q_\theta$ , as shown in Figure 2 and Figure 8. The target network has the same architecture as the online network, but uses a different set of weights $\xi$ .  The target network provides the regression targets to train the online network, and its parameters $\xi$ are an exponential moving average of the online parameters $\theta$ .  More precisely, given a target decay rate $\tau \in [0, 1]$ , after each training step we perform the following update,
+BYOL の目的は、下流タスクに利用可能な表現 $y_\theta$ を学習することである。前述のとおり、BYOL は学習のために **オンラインネットワーク** と **ターゲットネットワーク** という 2 つのニューラルネットワークを用いる。オンラインネットワークは重み $\theta$ により定義され、図 2 および図 8 に示すように、**エンコーダ** $f_\theta$ 、**プロジェクタ**  $g_\theta$ 、**プレディクタ** $q_\theta$ の 3 段階から構成される。ターゲットネットワークはオンラインネットワークと同じアーキテクチャを持つが、異なる重み $\xi$ を用いる。ターゲットネットワークはオンラインネットワークを学習するための回帰ターゲットを与え、そのパラメータ $\xi$ はオンラインパラメータ $\theta$ の指数移動平均である。より正確には、ターゲット減衰率 $\tau \in [0,1]$ が与えられたとき、各学習ステップの後に次の更新を行う。
 
 $$
 \xi\leftarrow\tau\xi+(1-\tau)\theta.\tag{1}
 $$
 
-Given a set of images $\mathcal{D}$ , an image $x\sim\mathcal{D}$ sampled uniformly from $\mathcal{D}$ ,  and two distributions of image augmentations $\mathcal{T}$ and $\mathcal{T}^{\prime}$ , BYOL produces two augmented views $v\triangleq t(x)$ and $v^{\prime}\triangleq t^{\prime}(x)$ from $x$ by applying respectively image augmentations $t\sim \mathcal{T}$ and $t^{\prime}\sim \mathcal{T}^{\prime}$ .  From the first augmented view $v$ , the online network outputs a representation $y_\theta\triangleq f_\theta(v)$ and a projection $z_\theta\triangleq g_\theta(y)$ .  The target network outputs $y_\xi^{\prime}\triangleq f_\xi(v^{\prime})$ and the target projection $z_\xi^{\prime}\triangleq g_\xi(y^{\prime})$ from the second augmented view $v^{\prime}$ . We then output a prediction $q_\theta(z_\theta)$ of $z_\xi^{\prime}$ and $\ell_2$ -normalize both $q_\theta(z_\theta)$ and $z_\xi^{\prime}$ to $\bar{q_\theta}(z_\theta)\triangleq q_\theta(z_\theta)/\|q_\theta(z_\theta)\|_2$ and $\bar{z_\xi}^{\prime}\triangleq z_\xi^{\prime}/\|z_\xi^{\prime}\|_2$ .  Note that this predictor is only applied to the online branch, making the architecture asymmetric between the online and target pipeline. Finally we define the following mean squared error between the normalized predictions and target projections,
+画像集合 $\mathcal{D}$ から一様にサンプリングされた画像 $x\sim\mathcal{D}$ 、および 2 つの画像拡張分布 $\mathcal{T}$ と $\mathcal{T}^{\prime}$ が与えられたとする。BYOL は、 $t\sim \mathcal{T}$ および $t^{\prime}\sim \mathcal{T}^{\prime}$ により画像拡張をそれぞれ適用することで、 $x$ から 2 つの拡張ビュー $v\triangleq t(x)$ と $v^{\prime}\triangleq t^{\prime}(x)$ を生成する。最初の拡張ビュー $v$ から、オンラインネットワークは表現 $y_\theta\triangleq f_\theta(v)$ と射影 $z_\theta\triangleq g_\theta(y)$ を出力する。ターゲットネットワークは、2 番目の拡張ビュー $v^{\prime}$ から $y_\xi^{\prime}\triangleq f_\xi(v^{\prime})$ とターゲット射影 $z_\xi^{\prime}\triangleq g_\xi(y^{\prime})$ を出力する。続いて、 $z_\xi^{\prime}$ の予測 $q_\theta(z_\theta)$ を出力し、 $q_\theta(z_\theta)$ と $z_\xi^{\prime}$ の両方を $\ell_2$ 正規化して、それぞれ $\bar{q_\theta}(z_\theta)\triangleq q_\theta(z_\theta)/|q_\theta(z_\theta)|_2$ および $\bar{z_\xi}^{\prime}\triangleq z_\xi^{\prime}/|z_\xi^{\prime}|_2$ とする。なお、このプレディクタはオンライン側にのみ適用されるため、オンライン経路とターゲット経路のアーキテクチャは非対称になっている。最後に、正規化された予測とターゲット射影の間に次の平均二乗誤差を定義する。
 
 $$
-\mathcal{L}_{\theta, \xi}\triangleq \|\bar{q_\theta}(z_\theta)-\bar{z_\xi}^{\prime}\|_2^2 = 2 - 2 \cdot \frac{\langle q_\theta(z_\theta), z_\xi^{\prime} \rangle}{\|q_\theta(z_\theta)\|_2\cdot \|z_\xi^{\prime}\|_2}.\tag{2}
+\mathcal{L}_{\theta, \xi}\triangleq |\bar{q_\theta}(z_\theta)-\bar{z_\xi}^{\prime}|_2^2 = 2 - 2 \cdot \frac{\langle q_\theta(z_\theta), z_\xi^{\prime} \rangle}{|q_\theta(z_\theta)|_2\cdot |z_\xi^{\prime}|_2}.\tag{2}
 $$
 
-We symmetrize the loss $\mathcal{L}_{\theta, \xi}$ in Eq. 2 by separately feeding $v^{\prime}$ to the online network and $v$  to the target network to compute $\tilde{\mathcal{L}}_{\theta, \xi}$ .  At each training step, we perform a stochastic optimization step to minimize $\mathcal{L}_{\theta, \xi}^{\text{BYOL}} = \mathcal{L}_{\theta, \xi} + \tilde{\mathcal{L}}_{\theta, \xi}$ with respect to $\theta$ only, but not $\xi$ , as depicted by the stop-gradient in Figure 2. BYOL’s dynamics are summarized as
+私たちは、式 2 の損失 $\mathcal{L}_{\theta, \xi}$ を対称化するために、 $v^{\prime}$ をオンラインネットワークへ、 $v$ をターゲットネットワークへそれぞれ入力して $\tilde{\mathcal{L}}_{\theta, \xi}$ を計算する。各学習ステップにおいて、 $\mathcal{L}_{\theta, \xi}^{\text{BYOL}} = \mathcal{L}_{\theta, \xi} + \tilde{\mathcal{L}}_{\theta, \xi}$ を最小化するように、 $\theta$ のみに関して確率的最適化ステップを行い、 $\xi$ に関しては行わない。これは図 2 の stop-gradient によって示されている。BYOL のダイナミクスは次のように要約される。
 
 $$
 \theta\leftarrow\text{optimizer}(\theta, \nabla_\theta\mathcal{L}_{\theta, \xi}^\text{BYOL}, \eta),\tag{3}
 $$
 
-where optimizer is an optimizer and $\eta$ is a learning rate.
+ここで、optimizer は最適化アルゴリズムであり、 $\eta$ は学習率である。
 
-At the end of training, we only keep the encoder $f_\theta$ ;  as in [9]. When comparing to other methods, we consider the number of inference-time weights only in the final representation $f_\theta$ .  The full training procedure is summarized in Appendix A, and python pseudo-code based on the libraries JAX [64] and Haiku [65] is provided in in Appendix J.
+学習終了後には、エンコーダ $f_\theta$ のみを保持する。これは [9] と同様である。他手法と比較する際には、最終表現 $f_\theta$ における推論時の重み数のみを考慮する。完全な学習手順は付録 A に要約されており、JAX [64] および Haiku [65] ライブラリに基づく Python の疑似コードが付録 J に示されている。
 
 ![](../images/byol_fig2.png)
-Figure 2: BYOL’s architecture. BYOL minimizes a similarity loss between $q_\theta(z_\theta)$ and $\mathrm{sg}(z_\xi^\prime)$ , where $\theta$ are the trained weights, $\xi$ are an exponential moving average of $\theta$ and $\mathrm{sg}$ means stop-gradient. At the end of training, everything but $f_\theta$ is discarded, and $y_\theta$ is used as the image representation.
+図 2：BYOL のアーキテクチャ。BYOL は、$q_\theta(z_\theta)$ と $\mathrm{sg}(z_\xi^\prime)$ の間の類似度損失を最小化する。ここで、$\theta$ は学習される重み、$\xi$ は $\theta$ の指数移動平均、$\mathrm{sg}$ は stop-gradient を意味する。学習の終了時には、$f_\theta$ 以外のすべては破棄され、$y_\theta$ が画像表現として用いられる。
 
 ### 3.2 Intuitions on BYOL’s behavior
 
-As BYOL does not use an explicit term to prevent collapse (such as negative examples [10]) while minimizing $\mathcal{L}_{\theta,\xi}^\mathrm{BYOL}$ with respect to $\theta$,  it may seem that BYOL should converge to a minimum of this loss with respect to $\left(\theta,\xi\right)$ (e.g., a collapsed constant representation). However BYOL’s target parameters $\xi$ updates are not in the direction of $\nabla_\xi\mathcal{L}_{\theta,\xi}^\mathrm{BYOL}$ .  More generally, we hypothesize that there is no loss $L_{\theta,\xi}$ such that BYOL’s dynamics is a gradient descent on $L$ jointly ove $\theta,\xi$ .  This is similar to GANs [66], where there is no loss that is jointly minimized w.r.t. both the discriminator and generator parameters. There is therefore no a priori reason why BYOL’s parameters would converge to a minimum of $\mathcal{L}_{\theta,\xi}^\mathrm{BYOL}$ .
+BYOL は、$\mathcal{L}_{\theta,\xi}^\mathrm{BYOL}$ を $\theta$ に関して最小化する際に、崩壊を防ぐための明示的な項（たとえば負例 [10]）を用いないため、BYOL は $\left(\theta,\xi\right)$ に関するこの損失の最小値（たとえば崩壊した定数表現）へ収束してしまうようにも見える。しかし、BYOL におけるターゲットパラメータ $\xi$ の更新は、$\nabla_\xi\mathcal{L}_{\theta,\xi}^\mathrm{BYOL}$ の方向ではない。より一般には、BYOL のダイナミクスが $\theta,\xi$ に関する同時な勾配降下となるような損失 $L*{\theta,\xi}$ は存在しないのではないか、と私たちは仮定している。これは GAN [66] と似ており、そこでは識別器と生成器のパラメータの両方に関して同時に最小化される単一の損失は存在しない。したがって、BYOL のパラメータが $\mathcal{L}_{\theta,\xi}^\mathrm{BYOL}$ の最小値に収束するべきだという先験的な理由はない。
 
-While BYOL’s dynamics still admit undesirable equilibria, we did not observe convergence to such equilibria in our experiments. In addition, when assuming BYOL’s predictor to be optimal i.e., $q_\theta=q^\star$
-
-$$
-q^\star \triangleq \operatorname*{arg\,min}_{q}\mathbb{E}\left[\|q(z_\theta-z_\xi^{\prime})\|_2^2\right], \qquad \mathrm{where}\quad q^\star(z_\theta)=\mathbb{E}\left[z_\xi^{\prime}\mid z_\theta\right],\tag{4}
-$$
-
-we hypothesize that the undesirable equilibria are unstable. Indeed, in this optimal predictor case, BYOL’s updates on $\theta$ follow in expectation the gradient of the expected conditional variance (see Appendix H for details),
+BYOL のダイナミクスは依然として望ましくない平衡点を持ちうるが、私たちの実験ではそのような平衡点への収束は観測されなかった。さらに、BYOL の予測器が最適、すなわち $q_\theta=q^\star$ であると仮定すると、
 
 $$
-\nabla_\theta\mathbb{E}\left[\|q^\star(z_\theta)-z_\xi^{\prime}\|_2^2\right]=\nabla_\theta\mathbb{E}\left[\|\mathbb{E}[z_\xi^{\prime}\mid z_\theta]-z_\xi^{\prime}\|_2^2\right]=\nabla_\theta\mathbb{E}\Bigl[\sum_i\mathrm{Var}(z_{\xi, i}^{\prime}\mid z_\theta)\Bigr], \tag{5}
+q^\star \triangleq \operatorname*{arg,min}_{q}\mathbb{E}\left[|q(z_\theta-z_\xi^{\prime})|_2^2\right], \qquad \mathrm{where}\quad q^\star(z_\theta)=\mathbb{E}\left[z_\xi^{\prime}\mid z_\theta\right],\tag{4}
 $$
 
-where $z_{\xi, i}^{\prime}$ is the $i$ -th feature of $z_\xi^{\prime}$ .
+私たちは、望ましくない平衡点は不安定であると仮定している。実際、この最適予測器の場合には、$\theta$ に関する BYOL の更新は、期待条件付き分散の勾配に期待値の意味で従う（詳細は付録 H を参照）。
 
-Note that for any random variables $X, Y, \text{and } Z, \mathrm{Var}(X\mid Y, Z)\leq\mathrm{Var}(X\mid Y).$ Let $X$ be the target projection, $Y$ the current online projection, and $Z$ an additional variability on top of the online projection induced by stochasticities in the training dynamics: purely discarding information from the online projection cannot decrease the conditional variance.
+$$
+\nabla_\theta\mathbb{E}\left[|q^\star(z_\theta)-z_\xi^{\prime}|_2^2\right]=\nabla_\theta\mathbb{E}\left[|\mathbb{E}[z_\xi^{\prime}\mid z_\theta]-z_\xi^{\prime}|_2^2\right]=\nabla_\theta\mathbb{E}\Bigl[\sum_i\mathrm{Var}(z_{\xi, i}^{\prime}\mid z_\theta)\Bigr], \tag{5}
+$$
 
-In particular, BYOL avoids constant features in $z_\theta$  as, for any constant $c$ and random variables $z_\theta$ and $z_\theta^{\prime}, \mathrm{Var}(z_\xi^{\prime}\mid z_\theta)\leq \mathrm{Var}(z_\xi^{\prime}\mid c)$ ; hence our hypothesis on these collapsed constant equilibria being unstable. Interestingly, if we were to minimize $\mathbb{E}\left[\sum_i\mathrm{Var}(z_{\xi, i}^{\prime}\mid z_\theta)\right]$ with respect to $\xi$ ,  we would get a collapsed $z_\xi^{\prime}$ as the variance is minimized for a constant $z_\xi^{\prime}$ . Instead, BYOL makes $\xi$ closer to $\theta$ ,  incorporating sources of variability captured by the online projection into the target projection.
+ここで、$z_{\xi, i}^{\prime}$ は $z_\xi^{\prime}$ の $i$ 番目の特徴である。
 
-Furthemore, notice that performing a hard-copy of the online parameters $\theta$ into the target parameters $\xi$ would be enough to propagate new sources of variability. However, sudden changes in the target network might break the assumption of an optimal predictor, in which case BYOL’s loss is not guaranteed to be close to the conditional variance. We hypothesize that the main role of BYOL’s moving-averaged target network is to ensure the near-optimality of the predictor over training; Section 5 and Appendix I provide some empirical support of this interpretation.
+任意の確率変数 $X, Y, Z$ について、$\mathrm{Var}(X\mid Y, Z)\leq\mathrm{Var}(X\mid Y)$ であることに注意されたい。$X$ をターゲット射影、$Y$ を現在のオンライン射影、$Z$ を学習ダイナミクスにおける確率性によってオンライン射影の上に加わる追加の変動とすると、オンライン射影から単に情報を捨てるだけでは、条件付き分散を減少させることはできない。
+
+特に、BYOL は $z_\theta$ における定数特徴を回避する。なぜなら、任意の定数 $c$ と確率変数 $z_\theta, z_\theta^{\prime}$ に対して、$\mathrm{Var}(z_\xi^{\prime}\mid z_\theta)\leq \mathrm{Var}(z_\xi^{\prime}\mid c)$ だからである。したがって、こうした崩壊した定数平衡点は不安定である、というのが私たちの仮説である。興味深いことに、もし $\mathbb{E}\left[\sum_i\mathrm{Var}(z_{\xi, i}^{\prime}\mid z_\theta)\right]$ を $\xi$ に関して最小化したならば、分散は定数な $z_\xi^{\prime}$ で最小になるため、崩壊した $z_\xi^{\prime}$ が得られてしまう。これに対して BYOL では、$\xi$ を $\theta$ に近づけるように更新し、オンライン射影が捉えた変動の源をターゲット射影へ取り込んでいる。
+
+さらに、オンラインパラメータ $\theta$ をターゲットパラメータ $\xi$ にハードコピーするだけでも、新たな変動の源を伝播させるには十分であることに注意されたい。しかし、ターゲットネットワークの急激な変化は、予測器が最適であるという仮定を破ってしまう可能性があり、その場合 BYOL の損失が条件付き分散に近いとは保証されない。私たちは、BYOL における移動平均ターゲットネットワークの主たる役割は、学習を通じて予測器の準最適性を保つことにあると仮定している。5 節および付録 I では、この解釈を支持するいくつかの実験的結果を示している。
 
 ### 3.3 Implementation details
 
-#### Image augmentations
+#### 画像拡張
 
-BYOL uses the same set of image augmentations as in SimCLR [8]. First, a random patch of the image is selected and resized to 224 × 224 with a random horizontal flip, followed by a color distortion, consisting of a random sequence of brightness, contrast, saturation, hue adjustments, and an optional grayscale conversion. Finally Gaussian blur and solarization are applied to the patches. Additional details on the image augmentations are in Appendix B.
+BYOL は SimCLR [8] と同じ画像拡張の組を用いる。まず、画像からランダムなパッチを選択し、それをランダムな水平反転とともに $224 \times 224$ にリサイズする。続いて、明るさ・コントラスト・彩度・色相の調整をランダムな順序で行い、さらに必要に応じてグレースケール変換を施すことで構成される色歪みを適用する。最後に、ガウシアンブラーとソラリゼーションをパッチに適用する。画像拡張に関する追加の詳細は付録 B に示す。
 
-#### Architecture
+#### アーキテクチャ
 
-We use a convolutional residual network [22] with 50 layers and post-activation (ResNet-50(1×) v1) as our base parametric encoders $f_\theta$ and $f_\xi$ . We also use deeper (50, 101, 152 and 200 layers) and wider (from 1× to 4×) ResNets, as in [67, 48, 8]. Specifically, the representation y corresponds to the output of the final average pooling layer, which has a feature dimension of 2048 (for a width multiplier of 1×). As in SimCLR [8], the representation $y$ is projected to a smaller space by a multi-layer perceptron (MLP) $g_\theta$ , and similarly for the target projection $g_\xi$ . This MLP consists in a linear layer with output size 4096 followed by batch normalization [68], rectified linear units (ReLU) [69], and a final linear layer with output dimension 256. Contrary to SimCLR, the output of this MLP is not batch normalized. The predictor $q_\theta$ uses the same architecture as $g_\theta$ .
+私たちは、畳み込み残差ネットワーク [22] の 50 層版である post-activation の ResNet-50(1×) v1 を、基本のパラメトリックエンコーダ $f_\theta$ および $f_\xi$ として用いる。また、[67, 48, 8] と同様に、より深い（50、101、152、200 層）およびより広い（1× から 4× までの）ResNet も用いる。具体的には、表現 $y$ は最終平均プーリング層の出力に対応し、その特徴次元は 2048 である（幅倍率 1× の場合）。SimCLR [8] と同様に、表現 $y$ は多層パーセプトロン（MLP）$g_\theta$ によってより小さな空間へ射影され、ターゲット側でも同様に $g_\xi$ を用いる。この MLP は、出力サイズ 4096 の線形層、その後のバッチ正規化 [68]、ReLU [69]、そして出力次元 256 の最終線形層から構成される。SimCLR とは異なり、この MLP の出力にはバッチ正規化を適用しない。予測器 $q_\theta$ は $g_\theta$ と同じアーキテクチャを用いる。
 
-#### Optimization
+#### 最適化
 
-We use the LARS optimizer [70] with a cosine decay learning rate schedule [71], without restarts, over 1000 epochs, with a warm-up period of 10 epochs. We set the base learning rate to 0.2, scaled linearly [72]
-with the batch size (LearningRate = 0.2 × BatchSize/256). In addition, we use a global weight decay parameter of $1.5\cdot10^{-6}$ while excluding the biases and batch normalization parameters from both LARS adaptation and weight decay. For the target network, the exponential moving average parameter $\tau$  starts from $\tau_{\mathrm{base}}=0.996$ and is increased to one during training. Specifically, we set $\tau\triangleq 1-(1-\tau_{\mathrm{base}})\cdot (\cos(\pi k/K)+1)/2$ with $k$ the current training step and $K$ he maximum number of training steps. We use a batch size of 4096 split over 512 Cloud TPU v3 cores. With this setup, training takes approximately 8 hours for a ResNet-50(×1). All hyperparameters are summarized in Appendix J; an additional set of hyperparameters for a smaller batch size of 512 is provided in Appendix G.
+私たちは、LARS オプティマイザ [70] と、再始動なしの cosine decay 学習率スケジュール [71] を用い、1000 エポックにわたって学習を行う。このとき、最初の 10 エポックをウォームアップ期間とする。基本学習率は 0.2 とし、バッチサイズに対して線形にスケーリングする [72]。
+
+$$
+\mathrm{LearningRate} = 0.2 \times \mathrm{BatchSize}/256
+$$
+
+さらに、グローバルな weight decay パラメータとして $1.5\cdot10^{-6}$ を用いるが、バイアス項とバッチ正規化パラメータについては、LARS の適応および weight decay の両方から除外する。ターゲットネットワークについては、指数移動平均パラメータ $\tau$ を $\tau_{\mathrm{base}}=0.996$ から開始し、学習中に 1 まで増加させる。具体的には、現在の学習ステップを $k$、最大学習ステップ数を $K$ として、次のように設定する。
+
+$$
+\tau\triangleq 1-(1-\tau_{\mathrm{base}})\cdot (\cos(\pi k/K)+1)/2
+$$
+
+私たちは、512 個の Cloud TPU v3 コアに分割したバッチサイズ 4096 を用いる。この設定では、ResNet-50(×1) の学習には約 8 時間を要する。すべてのハイパーパラメータは付録 J にまとめてあり、より小さなバッチサイズ 512 に対する追加のハイパーパラメータは付録 G に示している。
 
 ## 4. Experimental evaluation
 
-We assess the performance of BYOL’s representation after self-supervised pretraining on the training set of the ImageNet ILSVRC-2012 dataset [21]. We first evaluate it on ImageNet (IN) in both linear evaluation and semisupervised setups. We then measure its transfer capabilities on other datasets and tasks, including classification, segmentation, object detection and depth estimation. For comparison, we also report scores for a representation trained using labels from the train ImageNet subset, referred to as Supervised-IN. In Appendix E, we assess the generality of BYOL by pretraining a representation on the Places365-Standard dataset [73] before reproducing this evaluation protocol.
+私たちは、ImageNet ILSVRC-2012 データセット [21] の訓練セット上で自己教師あり事前学習を行った後の、BYOL の表現性能を評価する。まず、ImageNet（IN）上で、線形評価設定および半教師あり設定の両方において評価を行う。次に、分類、セグメンテーション、物体検出、深度推定を含む他のデータセットおよびタスクに対する転移性能を測定する。比較のために、train ImageNet subset のラベルを用いて学習した表現のスコアも報告し、これを Supervised-IN と呼ぶ。付録 E では、Places365-Standard データセット [73] 上で表現を事前学習した後に同じ評価プロトコルを再現することで、BYOL の汎用性を評価する。
 
 #### Linear evaluation on ImageNet 
 
-We first evaluate BYOL’s representation by training a linear classifier on top of the frozen representation, following the procedure described in [48, 74, 41, 10, 8], and appendix C.1; we report top-1 and top-5 accuracies in % on the test set in Table 1. With a standard ResNet-50 (×1) BYOL obtains 74.3% top-1 accuracy (91.6% top-5 accuracy), which is a 1.3% (resp. 0.5%) improvement over the previous self-supervised state of the art [12]. This tightens the gap with respect to the supervised baseline of [8], 76.5%, but is still significantly below the stronger supervised baseline of [75], 78.9%. With deeper and wider architectures, BYOL consistently outperforms the previous state of the art (Appendix C.2), and obtains a best performance of 79.6% top-1 accuracy, ranking higher than previous self-supervised approaches. On a ResNet-50 (4×) BYOL achieves 78.6%, similar to the 78.9% of the best supervised baseline in [8] for the same architecture.
+まず最初に、[48, 74, 41, 10, 8] および付録 C.1 に記載された手順に従い、凍結した表現の上に線形分類器を学習することで、BYOL の表現を評価する。結果は、テストセットにおける top-1 および top-5 精度（%）として表 1 に報告する。標準的な ResNet-50（×1）を用いた場合、BYOL は **74.3%** の top-1 精度（**91.6%** の top-5 精度）を達成し、これは従来の自己教師あり学習における最先端手法 [12] に対して **1.3%**（top-5 では **0.5%**）の改善である。この結果により、[8] における教師ありベースライン **76.5%** との差は縮まったが、より強力な教師ありベースライン [75] の **78.9%** には依然として大きく及ばない。より深く、より幅広いアーキテクチャを用いた場合でも、BYOL は一貫して従来の最先端手法を上回り（付録 C.2）、最良では **79.6%** の top-1 精度を達成し、過去の自己教師あり学習手法より高い順位を示した。ResNet-50（4×）では、BYOL は **78.6%** を達成し、同じアーキテクチャに対する [8] の最良の教師ありベースライン **78.9%** と同程度である。
 
 ![](../images/byol_table1.png)
 
 #### Semi-supervised training on ImageNet
 
-Next, we evaluate the performance obtained when fine-tuning BYOL’s representation on a classification task with a small subset of ImageNet’s train set, this time using label information. We follow the semi-supervised protocol of [74, 76, 8, 32] detailed in Appendix C.1, and use the same fixed splits of respectively 1% and 10% of ImageNet labeled training data as in [8]. We report both top-1 and top-5 accuracies on the test set in Table 2. BYOL consistently outperforms previous approaches across a wide range of architectures. Additionally, as detailed in Appendix C.1, BYOL reaches 77.7% top-1 accuracy with ResNet-50 when fine-tuning over 100% of ImageNet labels.
+次に、ImageNet の訓練セットの一部のみを用い、今回はラベル情報を利用して、BYOL の表現を分類タスク上でファインチューニングした際の性能を評価する。私たちは、付録 C.1 に詳述された [74, 76, 8, 32] の半教師ありプロトコルに従い、[8] と同じく、ImageNet のラベル付き訓練データのそれぞれ 1% および 10% の固定分割を用いる。結果は、テストセットにおける top-1 および top-5 精度の両方として表 2 に報告する。BYOL は、幅広いアーキテクチャにわたって、一貫して従来手法を上回る。さらに、付録 C.1 に詳述するように、BYOL は ResNet-50 を用いた場合、ImageNet のラベルの 100% を使ってファインチューニングすると **77.7%** の top-1 精度に到達する。
 
 ![](../images/byol_table2.png)
 
 #### Transfer to other classification tasks
 
-We evaluate our representation on other classification datasets to assess whether the features learned on ImageNet (IN) are generic and thus useful across image domains, or if they are ImageNet-specific. We perform linear evaluation and fine-tuning on the same set of classification tasks used in [8, 74], and carefully follow their evaluation protocol, as detailed in Appendix D. Performance is reported using standard metrics for each benchmark, and results are provided on a held-out test set after hyperparameter selection on a validation set. We report results in Table 3, both for linear evaluation and fine-tuning. BYOL outperforms SimCLR on all benchmarks and the Supervised-IN baseline on 7 of the 12 benchmarks, providing only slightly worse performance on the 5 remaining benchmarks. BYOL’s representation can be transferred over to small images, e.g., CIFAR [78], landscapes, e.g., SUN397 [79] or VOC2007 [80], and textures, e.g., DTD [81].
+ImageNet（IN）上で学習された特徴が汎用的であり、したがってさまざまな画像ドメインにわたって有用なのか、それとも ImageNet に特化したものなのかを評価するために、私たちは他の分類データセット上で表現を評価する。[8, 74] で用いられたものと同じ分類タスク群に対して、線形評価およびファインチューニングを行い、付録 D に詳述されている評価プロトコルを厳密に踏襲する。性能は各ベンチマークにおける標準的な指標で報告し、結果は検証セットでハイパーパラメータ選択を行った後、分離されたテストセット上で示す。表 3 には、線形評価とファインチューニングの両方の結果を示す。BYOL はすべてのベンチマークにおいて SimCLR を上回り、12 個のベンチマークのうち 7 個で Supervised-IN ベースラインも上回った。残る 5 個のベンチマークでも、性能低下はごくわずかである。BYOL の表現は、小さな画像、たとえば CIFAR [78]、風景画像、たとえば SUN397 [79] や VOC2007 [80]、さらにはテクスチャ画像、たとえば DTD [81] に対しても転移可能である。
 
 ![](../images/byol_table3.png)
 
 #### Transfer to other vision tasks
 
-We evaluate our representation on different tasks relevant to computer vision practitioners, namely semantic segmentation, object detection and depth estimation. With this evaluation, we assess whether BYOL’s representation generalizes beyond classification tasks.
+私たちは、コンピュータビジョンの実務家にとって重要な異なるタスク、すなわち**セマンティックセグメンテーション**、**物体検出**、**深度推定**において、BYOL の表現を評価する。この評価によって、BYOL の表現が分類タスクを超えて一般化するかどうかを検証する。
 
-We first evaluate BYOL on the VOC2012 semantic segmentation task as detailed in Appendix D.4, where the
-goal is to classify each pixel in the image [7]. We report the results in Table 4a. BYOL outperforms both the Supervised-IN baseline (+1.9 mIoU) and SimCLR (+1.1 mIoU).
+まず、付録 D.4 に詳述した設定で、VOC2012 のセマンティックセグメンテーションタスクにおいて BYOL を評価する。このタスクの目的は、画像内の各ピクセルを分類することである [7]。結果は表 4a に示す。BYOL は、Supervised-IN ベースライン（+1.9 mIoU）および SimCLR（+1.1 mIoU）の両方を上回る。
 
-Similarly, we evaluate on object detection by reproducing the setup in [9] using a Faster R-CNN architecture [82], as detailed in Appendix D.5. We fine-tune on trainval2007 and report results on test2007 using the standard $\mathrm{AP}_{50}$ metric; BYOL is significantly better than the Supervised-IN baseline (+3.1 $\mathrm{AP}_{50}$ ) and SimCLR (+2.3 $\mathrm{AP}_{50}$ ).
+同様に、物体検出についても、付録 D.5 に詳述したように、[9] の設定を Faster R-CNN アーキテクチャ [82] で再現して評価する。trainval2007 でファインチューニングを行い、標準的な $\mathrm{AP}_{50}$ 指標を用いて test2007 上で結果を報告する。BYOL は、Supervised-IN ベースラインよりも大幅に高く（+3.1 $\mathrm{AP}_{50}$）、また SimCLR よりも高い性能（+2.3 $\mathrm{AP}_{50}$）を示す。
 
-Finally, we evaluate on depth estimation on the NYU v2 dataset, where the depth map of a scene is estimated given a single RGB image. Depth prediction measures how well a network represents geometry, and how well that information can be localized to pixel accuracy [40]. The setup is based on [83] and detailed in Appendix D.6. We evaluate on the commonly used test subset of 654 images and report results using several common metrics in Table 4b: relative (rel) error, root mean squared (rms) error, and the percent of pixels (pct) where the error, $\max(d_{gt}/d_p, d_p/d_{gt})$ , is below $1.25^n$ thresholds where $d_p$ is the predicted depth and $d_{gt}$ is the ground truth depth [40]. BYOL is better or on par with other methods for each metric. For instance, the challenging $\mathrm{pct.}<1.25$ measure is respectively improved by +3.5 points and +1.3 points compared to supervised and SimCLR baselines.
+最後に、単一の RGB 画像からシーンの深度マップを推定する NYU v2 データセット上で深度推定を評価する。深度予測は、ネットワークが幾何情報をどれだけよく表現できているか、そしてその情報をピクセル精度でどれだけ正確に局所化できているかを測るものである [40]。設定は [83] に基づき、付録 D.6 に詳述する。一般に用いられる 654 枚のテスト画像サブセット上で評価を行い、表 4b に、複数の標準的な指標を用いて結果を報告する。すなわち、相対誤差（rel）、二乗平均平方根誤差（rms）、および誤差 $\max(d_{gt}/d_p, d_p/d_{gt})$ が $1.25^n$ 未満であるピクセルの割合（pct）である。ここで、$d_p$ は予測深度、$d_{gt}$ は真値深度を表す [40]。BYOL は、各指標において他手法と同等またはそれ以上の性能を示す。たとえば、難しい指標である $\mathrm{pct.}<1.25$ は、教師ありベースラインおよび SimCLR ベースラインと比べて、それぞれ +3.5 ポイントおよび +1.3 ポイント改善している。
 
 ![](../images/byol_table4.png)
 
 ## 5. Building intuitions with ablations
 
-We present ablations on BYOL to give an intuition of its behavior and performance. For reproducibility, we run each configuration of parameters over three seeds, and report the average performance. We also report the half difference
-between the best and worst runs when it is larger than 0.25. Although previous works perform ablations at 100 epochs [8, 12], we notice that relative improvements at 100 epochs do not always hold over longer training. For this reason, we run ablations over 300 epochs on 64 TPU v3 cores, which yields consistent results compared to our baseline training of 1000 epochs. For all the experiments in this section, we set the initial learning rate to 0.3 with batch size 4096, the weight decay to $10^{−6}$ as in SimCLR [8] and the base target decay rate τbase to 0.99. In this section we report results in top-1 accuracy on ImageNet under the linear evaluation protocol as in Appendix C.1.
+BYOL の挙動と性能について直感を与えるために、私たちは BYOL に関するアブレーションを示す。再現性のために、各パラメータ構成について 3 つのシードで実行し、その平均性能を報告する。また、最良の実行と最悪の実行の差の半分が 0.25 を超える場合には、その値も併せて報告する。これまでの研究では 100 エポックでアブレーションを行うことが多いが [8, 12]、私たちは 100 エポック時点での相対的な改善が、より長い学習において必ずしも維持されないことに気づいた。このため、64 個の TPU v3 コア上で 300 エポックにわたってアブレーションを実施したが、その結果は 1000 エポックで行うベースライン学習と比較して一貫していた。本節のすべての実験において、初期学習率は 0.3、バッチサイズは 4096、weight decay は SimCLR [8] と同様に $10^{-6}$、ベースのターゲット減衰率 $\tau_{\mathrm{base}}$ は 0.99 に設定する。本節では、付録 C.1 と同様に、ImageNet における線形評価プロトコルの top-1 精度で結果を報告する。
 
-#### Batch size
+#### バッチサイズ
 
-Among contrastive methods, the ones that draw negative examples from the minibatch suffer performance drops when their batch size is reduced. BYOL does not use negative examples and we expect it to be more robust to smaller batch sizes. To empirically verify this hypothesis, we train both BYOL and SimCLR using different batch sizes from 128 to 4096. To avoid re-tuning other hyperparameters, we average gradients over N consecutive steps before updating the online network when reducing the batch size by a factor N. The target network is updated once every N steps, after the update of the online network; we accumulate the N-steps in parallel in our runs.
+負例をミニバッチから取得するコントラスト学習法では、バッチサイズを小さくすると性能が低下する。BYOL は負例を用いないため、より小さなバッチサイズに対して頑健であると期待される。この仮説を実証的に検証するために、私たちは BYOL と SimCLR の両方を、128 から 4096 までの異なるバッチサイズで学習した。他のハイパーパラメータを再調整しないために、バッチサイズを $N$ 倍小さくする際には、オンラインネットワークを更新する前に、連続する $N$ ステップにわたって勾配を平均した。ターゲットネットワークは、オンラインネットワークの更新後に $N$ ステップごとに 1 回更新し、実行時にはこの $N$ ステップを並列に蓄積した。
 
-As shown in Figure 3a, the performance of SimCLR rapidly deteriorates with batch size, likely due to the decrease in the number of negative examples. In contrast, the performance of BYOL remains stable over a wide range of batch
-sizes from 256 to 4096, and only drops for smaller values due to batch normalization layers in the encoder.
+図 3a に示すように、SimCLR の性能はバッチサイズに対して急速に悪化する。これはおそらく負例の数が減少するためである。これに対して BYOL の性能は、256 から 4096 までの広いバッチサイズ範囲で安定しており、さらに小さい値ではエンコーダ内のバッチ正規化層の影響により性能が低下するだけである。
 
 ![](../images/byol_fig3.png)
 
-#### Image augmentations
+#### 画像拡張
 
-Contrastive methods are sensitive to the choice of image augmentations. For instance, SimCLR does not work well when removing color distortion from its image augmentations. As an explanation, SimCLR shows that crops of the same image mostly share their color histograms. At the same time, color histograms vary across images. Therefore, when a contrastive task only relies on random crops as image augmentations, it
-can be mostly solved by focusing on color histograms alone. As a result the representation is not incentivized to retain information beyond color histograms. To prevent that, SimCLR adds color distortion to its set of image augmentations. Instead, BYOL is incentivized to keep any information captured by the target representation into its online network, to improve its predictions. Therefore, even if augmented views of a same image share the same color histogram, BYOL is still incentivized to retain additional features in its representation. For that reason, we believe that BYOL is more robust to the choice of image augmentations than contrastive methods.
+コントラスト学習法は、画像拡張の選択に敏感である。たとえば SimCLR は、画像拡張から色歪みを取り除くとうまく機能しない。その説明として SimCLR では、同じ画像のクロップはたいてい同じ色ヒストグラムを共有し、一方で色ヒストグラムは画像間で異なることが示されている。したがって、コントラスト学習タスクがランダムクロップだけに依存している場合、その課題は主として色ヒストグラムだけに着目することで解けてしまう。その結果、表現は色ヒストグラムを超える情報を保持するようには促されない。これを防ぐために、SimCLR は画像拡張の組に色歪みを加える。これに対して BYOL では、ターゲット表現が捉えたあらゆる情報を、予測精度を高めるためにオンラインネットワーク内に保持するように促される。したがって、同じ画像の拡張ビューどうしが同じ色ヒストグラムを共有していたとしても、BYOL は依然として追加の特徴を表現内に保持するよう促される。この理由から、私たちは BYOL がコントラスト学習法よりも画像拡張の選択に対して頑健であると考えている。
 
-Results presented in Figure 3b support this hypothesis: the performance of BYOL is much less affected than the performance of SimCLR when removing color distortions from the set of image augmentations (−9.1 accuracy points for BYOL, −22.2 accuracy points for SimCLR). When image augmentations are reduced to mere random crops, BYOL still displays good performance (59.4%, i.e. −13.1 points from 72.5% ), while SimCLR loses more than a third of its performance (40.3%, i.e. −27.6 points from 67.9%). We report additional ablations in Appendix F.3.
+図 3b の結果はこの仮説を支持している。画像拡張の組から色歪みを除去したとき、BYOL の性能低下は SimCLR よりもはるかに小さい（BYOL は −9.1 ポイント、SimCLR は −22.2 ポイント）。画像拡張を単なるランダムクロップのみにまで減らしても、BYOL はなお良好な性能を示す（59.4%、すなわち 72.5% から −13.1 ポイント）。一方、SimCLR は性能の 3 分の 1 以上を失う（40.3%、すなわち 67.9% から −27.6 ポイント）。追加のアブレーションは付録 F.3 に示す。
 
-#### Bootstrapping
+#### ブートストラップ
 
-BYOL uses the projected representation of a target network, whose weights are an exponential moving average of the weights of the online network, as target for its predictions. This way, the weights of the target network represent a delayed and more stable version of the weights of the online network. When the
-target decay rate is 1, the target network is never updated, and remains at a constant value corresponding to its initialization. When the target decay rate is 0, the target network is instantaneously updated to the online network at each step. There is a trade-off between updating the targets too often and updating them too slowly, as illustrated in Table 5a. Instantaneously updating the target network ( $\tau=0$ ) destabilizes training, yielding very poor performance while never updating the target ( $\tau=1$ ) makes the training stable but prevents iterative improvement, ending with low-quality final representation. All values of the decay rate between 0.9 and 0.999 yield performance above 68.4% top-1 accuracy at 300 epochs.
+BYOL は、重みがオンラインネットワークの重みの指数移動平均であるターゲットネットワークの射影表現を、予測のターゲットとして用いる。このようにして、ターゲットネットワークの重みは、オンラインネットワークの重みの遅延した、より安定なバージョンを表す。ターゲット減衰率が 1 のとき、ターゲットネットワークは一度も更新されず、初期化時の定数値のままとなる。ターゲット減衰率が 0 のとき、ターゲットネットワークは各ステップで即座にオンラインネットワークへ更新される。ターゲットをあまりに頻繁に更新しすぎることと、あまりに遅く更新しすぎることの間にはトレードオフがあり、その様子は表 5a に示されている。ターゲットネットワークを即時更新する（$\tau=0$）と学習は不安定になり、非常に低い性能しか得られない。一方、ターゲットをまったく更新しない（$\tau=1$）と学習は安定するが、反復的な改善が妨げられ、最終表現の品質は低くなる。減衰率が 0.9 から 0.999 の範囲にあるすべての値で、300 エポック時点の top-1 精度は 68.4% を上回る。
 
 ![](../images/byol_table5.png)
 
-#### Ablation to contrastive methods
+#### コントラスト学習法との比較アブレーション
 
-In this subsection, we recast SimCLR and BYOL using the same formalism to better understand where the improvement of BYOL over SimCLR comes from. Let us consider the following objective that extends the InfoNCE objective [10, 84] (see Appendix F.4),
-
-$$
-\mathrm{InfoNCE}_\theta^{\alpha,\beta}\triangleq \frac{2}{B} \sum_{i=1}^B S_\theta(v_i, v_i^\prime) - \beta \cdot \frac{2\alpha}{B} \sum_{i=1}^{B} \ln\Bigl(\sum_{j\neq i} \exp\frac{S_\theta(v_i, v_j)}{\alpha}+\sum_j\exp\frac{S_\theta(v_i, v_j^\prime)}{\alpha}\Bigr).\tag{6}
-$$
-
-where $\alpha>0$ is a fixed temperature, $\beta\in[0, 1]$ a weighting coefficient, $B$ the batch size, $v$ and $v^\prime$ are batches of augmented views where for any batch index $i, v_i$ and $v_i^\prime$ are augmented views from the same image; the realvalued function $S_\theta$  quantifies pairwise similarity between augmented views. For any augmented view $u$ we denote $z_\theta(u)\triangleq f_\theta(g_\theta(u))$ and $z_\xi(u)\triangleq f_\xi(g_\xi(u))$ . For given $\phi$ and $\psi$ , we consider the normalized dot product
+この小節では、BYOL が SimCLR を上回る理由をよりよく理解するために、SimCLR と BYOL を同じ形式で書き直す。次の目的関数を考える。これは InfoNCE 目的 [10, 84] を拡張したものである（付録 F.4 参照）。
 
 $$
-S_\theta(u_1, u_2)\triangleq \frac{\langle \phi(u_1), \psi(u_2) \rangle}{\|\phi(u_1)\|_2\cdot\|\psi(u_2)\|_2}.\tag{7}
+\mathrm{InfoNCE}_\theta^{\alpha,\beta}\triangleq \frac{2}{B} \sum*{i=1}^B S_\theta(v_i, v_i^\prime) - \beta \cdot \frac{2\alpha}{B} \sum_{i=1}^{B} \ln\Bigl(\sum_{j\neq i} \exp\frac{S_\theta(v_i, v_j)}{\alpha}+\sum_j\exp\frac{S_\theta(v_i, v_j^\prime)}{\alpha}\Bigr).\tag{6}
 $$
 
-Up to minor details (cf. Appendix F.5), we recover the SimCLR loss with $\phi(u_1)=z_\theta(u_1)$ (no predictor), $\psi(u_2)=z_\theta(u_2)$ (no target network) and $\beta=1$ . We recover the BYOL loss when using a predictor and a target network, i.e. $\phi(u_i)=p_\theta(z_\theta(u_1))$ and $\psi(u_2)=z_\xi(u_2)$ with $\beta=0$ . To evaluate the influence of the target network, the predictor and the coefficient $\beta$ , we perform an ablation over them. Results are presented in Table 5b and more details are given in Appendix F.4.
+ここで、$\alpha>0$ は固定温度、$\beta\in[0, 1]$ は重み係数、$B$ はバッチサイズ、$v$ と $v^\prime$ は拡張ビューのバッチであり、任意のバッチ添字 $i$ に対して $v_i$ と $v_i^\prime$ は同じ画像から得られた拡張ビューである。実数値関数 $S_\theta$ は、拡張ビュー間のペアワイズ類似度を表す。任意の拡張ビュー $u$ に対して、$z_\theta(u)\triangleq f_\theta(g_\theta(u))$ および $z_\xi(u)\triangleq f_\xi(g_\xi(u))$ と表す。与えられた $\phi$ と $\psi$ に対して、正規化内積
 
-The only variant that performs well without negative examples (i.e., with $\beta=0$ )  is BYOL, using both a bootstrap target network and a predictor. Adding the negative pairs to BYOL’s loss without re-tuning the temperature parameter hurts its performance. In Appendix F.4, we show that we can add back negative pairs and still match the performance of BYOL with proper tuning of the temperature.
+$$
+S_\theta(u_1, u_2)\triangleq \frac{\langle \phi(u_1), \psi(u_2) \rangle}{|\phi(u_1)|_2\cdot|\psi(u_2)|_2}\tag{7}
+$$
 
-Simply adding a target network to SimCLR already improves performance (+1.6 points). This sheds new light on the use of the target network in MoCo [9], where the target network is used to provide more negative examples. Here, we show that by mere stabilization effect, even when using the same number of negative examples, using a target network is beneficial. Finally, we observe that modifying the architecture of $S_\theta$ to include a predictor only mildly affects the performance of SimCLR.
+を考える。細かな違いはあるが（付録 F.5 参照）、$\phi(u_1)=z_\theta(u_1)$（予測器なし）、$\psi(u_2)=z_\theta(u_2)$（ターゲットネットワークなし）、$\beta=1$ とすると SimCLR の損失を再現できる。予測器とターゲットネットワークを用い、すなわち $\phi(u_i)=p_\theta(z_\theta(u_1))$、$\psi(u_2)=z_\xi(u_2)$、$\beta=0$ とすると、BYOL の損失を再現できる。ターゲットネットワーク、予測器、および係数 $\beta$ の影響を評価するために、これらについてアブレーションを行った。結果は表 5b に示し、詳細は付録 F.4 に述べる。
 
-#### Network hyperparameters
+負例なし（すなわち $\beta=0$）で良好に動作する変種は、ブートストラップ型ターゲットネットワークと予測器の両方を用いる BYOL だけである。温度パラメータを再調整せずに BYOL の損失へ負例ペアを加えると、性能は低下する。付録 F.4 では、温度を適切に調整すれば、負例ペアを再び加えても BYOL と同等の性能を達成できることを示している。
 
-In Appendix F, we explore how other network parameters may impact BYOL’s performance. We iterate over multiple weight decays, learning rates, and projector/encoder architectures to observe that small hyperparameter changes do not drastically alter the final score. We note that removing the weight decay in either BYOL or SimCLR leads to network divergence, emphasizing the need for weight regularization in the self-supervised setting. Furthermore, we observe that changing the scaling factor in the network initialization [85] did not impact the performance (higher than 72% top-1 accuracy).
+SimCLR に単にターゲットネットワークを追加するだけでも、すでに性能は改善する（+1.6 ポイント）。これは、MoCo [9] におけるターゲットネットワークの用いられ方に新たな見方を与える。MoCo では、ターゲットネットワークはより多くの負例を提供するために使われているが、ここでは単なる安定化効果だけでも、同じ数の負例を用いている場合に有益であることを示している。最後に、$S_\theta$ のアーキテクチャを変更して予測器を含めても、SimCLR の性能への影響はごく小さいことが観察される。
 
+#### ネットワークのハイパーパラメータ
 
-#### Relationship with Mean Teacher
+付録 F では、他のネットワークパラメータが BYOL の性能にどのような影響を与えるかを調べている。複数の weight decay、学習率、プロジェクタ／エンコーダのアーキテクチャを試し、小さなハイパーパラメータ変更では最終スコアが大きく変わらないことを確認した。BYOL と SimCLR のいずれにおいても、weight decay を取り除くとネットワークは発散し、自己教師あり設定において重み正則化が必要であることが強調される。さらに、ネットワーク初期化 [85] におけるスケーリング係数を変更しても、性能には影響しなかった（top-1 精度は 72% 超）。
 
-Another semi-supervised approach, Mean Teacher (MT) [20], complements a supervised loss on few labels with an additional consistency loss. In [20], this consistency loss is the $\ell_2$ distance between the logits from a student network, and those of a temporally averaged version of the student network, called teacher. Removing the predictor in BYOL results in an unsupervised version of MT with no classification loss that uses image augmentations instead of the original architectural noise (e.g., dropout). This variant of BYOL collapses (Row 7 of Table 5) which suggests that the additional predictor is critical to prevent collapse in an unsupervised scenario.
+#### Mean Teacher との関係
 
-#### Importance of a near-optimal predictor
+別の半教師ありアプローチである Mean Teacher（MT）[20] は、少数ラベルに対する教師あり損失を、追加の一貫性損失で補完する。[20] では、この一貫性損失は student ネットワークのロジットと、teacher と呼ばれるその時間平均版ネットワークのロジットとの $\ell_2$ 距離である。BYOL から予測器を除くと、分類損失を持たない教師なし版の MT となり、元のアーキテクチャノイズ（たとえば dropout）の代わりに画像拡張を用いることになる。この BYOL の変種は崩壊する（表 5 の 7 行目）。これは、教師なし設定において崩壊を防ぐために追加の予測器が重要であることを示唆している。
 
-Table 5b already shows the importance of combining a predictor and a target network: the representation does collapse when either is removed. We further found that we can remove the target network without collapse by making the predictor near-optimal, either by (i) using an optimal linear predictor (obtained by linear regression on the current batch) before back-propagating the error through the network (52.5% top-1 accuracy), or (ii) increasing the learning rate of the predictor (66.5% top-1). By contrast, increasing the learning rates of both projector and predictor (without target network) yields poor results (≈ 25% top-1). See Appendix I for more details. This seems to indicate that keeping the predictor near-optimal at all times is important to preventing collapse, which may be one of the roles of BYOL’s target network.
+#### 準最適な予測器の重要性
+
+表 5b はすでに、予測器とターゲットネットワークを組み合わせることの重要性を示している。いずれか一方を除くと、表現は崩壊してしまう。さらに私たちは、予測器を準最適に保つことで、ターゲットネットワークを除去しても崩壊を防げることを見いだした。具体的には、(i) 現在のバッチに対して線形回帰によって得られる最適線形予測器を、ネットワークに誤差を逆伝播する前に用いる方法（top-1 精度 52.5%）、または (ii) 予測器の学習率を大きくする方法（top-1 精度 66.5%）である。これに対して、ターゲットネットワークなしでプロジェクタと予測器の両方の学習率を大きくすると、結果は悪い（top-1 精度は約 25%）となる。詳細は付録 I を参照されたい。これは、常に予測器を準最適に保つことが崩壊防止に重要であり、それが BYOL のターゲットネットワークの役割の一つである可能性を示している。 
 
 ## 6. Conclusion
 
-We introduced BYOL, a new algorithm for self-supervised learning of image representations. BYOL learns its representation by predicting previous versions of its outputs, without using negative pairs. We show that BYOL achieves state-of-the-art results on various benchmarks. In particular, under the linear evaluation protocol on ImageNet with a ResNet-50 (1×), BYOL achieves a new state of the art and bridges most of the remaining gap between self-supervised methods and the supervised learning baseline of [8]. Using a ResNet-200 (2×), BYOL reaches a top-1 accuracy of 79.6% which improves over the previous state of the art (76.8%) while using 30% fewer parameters.
-Nevertheless, BYOL remains dependent on existing sets of augmentations that are specific to vision applications. To generalize BYOL to other modalities (e.g., audio, video, text, . . . ) it is necessary to obtain similarly suitable
-augmentations for each of them. Designing such augmentations may require significant effort and expertise. Therefore, automating the search for these augmentations would be an important next step to generalize BYOL to
-other modalities.
+私たちは、自己教師ありによる画像表現学習のための新しいアルゴリズム **BYOL** を導入した。BYOL は、負例ペアを用いることなく、自身の出力の過去のバージョンを予測することで表現を学習する。私たちは、BYOL がさまざまなベンチマークにおいて最先端の結果を達成することを示した。特に、ResNet-50（1×）を用いた ImageNet の線形評価プロトコルにおいて、BYOL は新たな最先端性能を達成し、自己教師あり手法と [8] の教師あり学習ベースラインとの間に残されていた差の大部分を埋めている。ResNet-200（2×）を用いた場合、BYOL は **79.6%** の top-1 精度に到達し、従来の最先端性能（**76.8%**）を上回りつつ、パラメータ数を **30% 少なく**抑えている。
+
+それにもかかわらず、BYOL は依然として、ビジョン応用に特化した既存の画像拡張群に依存している。BYOL を他のモダリティ（たとえば音声、動画、テキストなど）へ一般化するためには、それぞれに対して同様に適切な拡張を得る必要がある。そのような拡張の設計には、かなりの労力と専門知識を要する可能性がある。したがって、これらの拡張の探索を自動化することは、BYOL を他のモダリティへ一般化するための重要な次の一歩となる。
 
