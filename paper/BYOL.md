@@ -162,6 +162,7 @@ BYOL の挙動と性能について直感を与えるために、私たちは BY
 図 3a に示すように、SimCLR の性能はバッチサイズに対して急速に悪化する。これはおそらく負例の数が減少するためである。これに対して BYOL の性能は、256 から 4096 までの広いバッチサイズ範囲で安定しており、さらに小さい値ではエンコーダ内のバッチ正規化層の影響により性能が低下するだけである。
 
 ![](../images/byol_fig3.png)
+*Fig3. Decrease in top-1 accuracy(in % points) of BYOL and our own reproduction of SimCLR at 300 epochs, under linear evaluation on ImageNet.*
 
 #### 画像拡張
 
@@ -180,7 +181,7 @@ BYOL は、重みがオンラインネットワークの重みの指数移動平
 この小節では、BYOL が SimCLR を上回る理由をよりよく理解するために、SimCLR と BYOL を同じ形式で書き直す。次の目的関数を考える。これは InfoNCE 目的 [10, 84] を拡張したものである（付録 F.4 参照）。
 
 $$
-\mathrm{InfoNCE}_\theta^{\alpha,\beta}\triangleq \frac{2}{B} \sum*{i=1}^B S_\theta(v_i, v_i^\prime) - \beta \cdot \frac{2\alpha}{B} \sum_{i=1}^{B} \ln\Bigl(\sum_{j\neq i} \exp\frac{S_\theta(v_i, v_j)}{\alpha}+\sum_j\exp\frac{S_\theta(v_i, v_j^\prime)}{\alpha}\Bigr).\tag{6}
+\mathrm{InfoNCE}_\theta^{\alpha,\beta}\triangleq \frac{2}{B} \sum_{i=1}^B S_\theta(v_i, v_i^\prime) - \beta \cdot \frac{2\alpha}{B} \sum_{i=1}^{B} \ln\Bigl(\sum_{j\neq i} \exp\frac{S_\theta(v_i, v_j)}{\alpha}+\sum_j\exp\frac{S_\theta(v_i, v_j^\prime)}{\alpha}\Bigr).\tag{6}
 $$
 
 ここで、$\alpha>0$ は固定温度、$\beta\in[0, 1]$ は重み係数、$B$ はバッチサイズ、$v$ と $v^\prime$ は拡張ビューのバッチであり、任意のバッチ添字 $i$ に対して $v_i$ と $v_i^\prime$ は同じ画像から得られた拡張ビューである。実数値関数 $S_\theta$ は、拡張ビュー間のペアワイズ類似度を表す。任意の拡張ビュー $u$ に対して、$z_\theta(u)\triangleq f_\theta(g_\theta(u))$ および $z_\xi(u)\triangleq f_\xi(g_\xi(u))$ と表す。与えられた $\phi$ と $\psi$ に対して、正規化内積
