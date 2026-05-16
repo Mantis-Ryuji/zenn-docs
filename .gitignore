@@ -4,5 +4,6 @@ runs/
 .pytest_cache/
 .vscode/
 node_modules/
+images/
 paper/
 *.json
