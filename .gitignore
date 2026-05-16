@@ -6,4 +6,5 @@ runs/
 node_modules/
 images/
 paper/
-*.json
+package-lock.json
+package.json
