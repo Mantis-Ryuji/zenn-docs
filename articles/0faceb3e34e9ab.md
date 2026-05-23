@@ -1,9 +1,9 @@
 ---
 title: "Group DRO 論文解説：過剰パラメータ化モデルの最悪グループ汎化"
 emoji: "🐡"
-type: "tech" # tech: 技術記事 / idea: アイデア
+type: "idea" # tech: 技術記事 / idea: アイデア
 topics: ["AI", "深層学習"]
-published: false
+published: true
 ---
 
 ## Group DRO 論文解説：過剰パラメータ化モデルの最悪グループ汎化
@@ -871,7 +871,7 @@ Table 3 を見ると、Waterbirds と CelebA では、upweighting は ERM より
 
 さらに、深層ニューラルネットワークのような非凸モデルでは、この対応は一般には成り立たない。
 
-:::details 凸設定における DRO と importance weighting の関係
+::::details 凸設定における DRO と importance weighting の関係
 
 ここでは、原論文の Appendix A.1 の命題 1 に対応する議論を整理する。
 
@@ -899,6 +899,95 @@ $$
 
 が成り立つ。
 
+:::details なぜ min と max の順番を入れ替えられるのか
+
+ここで用いている等式
+
+$$
+\sup_{Q\in\mathcal{Q}}\inf_{\theta\in\Theta}h(\theta,Q)=\inf_{\theta\in\Theta}\sup_{Q\in\mathcal{Q}}h(\theta,Q)
+$$
+
+は、常に成り立つわけではない。一般には、
+
+$$
+\sup_{Q\in\mathcal{Q}}\inf_{\theta\in\Theta}h(\theta,Q)\leq\inf_{\theta\in\Theta}\sup_{Q\in\mathcal{Q}}h(\theta,Q)
+$$
+
+のみが成り立つ。
+
+この不等式は、$\theta$ と $Q$ のどちらを先に選ぶかの違いとして理解できる。
+
+右辺
+
+$$
+\inf_{\theta\in\Theta}\sup_{Q\in\mathcal{Q}}h(\theta,Q)
+$$
+
+では、まずモデル側が $\theta$ を選び、その後で adversary 側がその $\theta$ にとって最も損失が大きくなる分布 $Q$ を選ぶ。これは DRO の目的そのものであり、モデル側にとって厳しい順序である。
+
+一方、左辺
+
+$$
+\sup_{Q\in\mathcal{Q}}\inf_{\theta\in\Theta}h(\theta,Q)
+$$
+
+では、まず分布 $Q$ が固定され、その後でモデル側がその $Q$ に対して最適な $\theta$ を選べる。つまり、モデルは分布を見た後で最適化できる。したがって、こちらの方がモデル側にとって有利である。
+
+そのため、一般には
+
+$$
+\sup_{Q\in\mathcal{Q}}\inf_{\theta\in\Theta}h(\theta,Q)\leq\inf_{\theta\in\Theta}\sup_{Q\in\mathcal{Q}}h(\theta,Q)
+$$
+
+となる。
+
+しかし、Appendix A.1 では、この不等式が等号になるための条件を置いている。具体的には、$\Theta$ と $\mathcal{Q}$ が凸かつコンパクトであり、関数 $h(\theta,Q)$ が $\theta$ に関して凸、$Q$ に関して凹であると仮定する。このような凸・凹構造のもとでは、minimax theorem により、min と max の順序を入れ替えることができる[^2]。
+
+今回の設定では、
+
+$$
+h(\theta,Q)=\mathbb{E}_{z\sim Q}[\ell(\theta;z)]
+$$
+
+である。
+
+まず、$\theta$ に関する凸性を確認する。各 $z$ に対して損失 $\ell(\cdot;z)$ が $\theta$ に関して凸であるので、その期待値である $h(\theta,Q)$ も $\theta$ に関しても凸である。これは、凸関数の非負重み付き平均も凸関数になるためである。
+
+次に、$Q$ に関する性質を確認する。任意の $Q_1,Q_2\in\mathcal{Q}$ と $\lambda\in[0,1]$ に対して、混合分布
+
+$$
+\lambda Q_1+(1-\lambda)Q_2
+$$
+
+を考える。この分布は、確率 $\lambda$ で $Q_1$ からサンプルし、確率 $1-\lambda$ で $Q_2$ からサンプルする分布である。このとき、期待値の線形性より、
+
+$$
+\begin{aligned}
+h(\theta,\lambda Q_1+(1-\lambda)Q_2)
+&=\mathbb{E}_{z\sim \lambda Q_1+(1-\lambda)Q_2}[\ell(\theta;z)] \\
+&=\lambda \mathbb{E}_{z\sim Q_1}[\ell(\theta;z)]+(1-\lambda)\mathbb{E}_{z\sim Q_2}[\ell(\theta;z)] \\
+&=\lambda h(\theta,Q_1)+(1-\lambda)h(\theta,Q_2).
+\end{aligned}
+$$
+
+したがって、$\theta$ を固定したとき、$h(\theta,Q)$ は $Q$ に関して線形である。
+
+> 分布を混合すると、期待損失も同じ比率で混合されるという意味
+
+線形関数は、凸性の不等式と凹性の不等式をどちらも等号で満たす。したがって、線形関数は凸でもあり凹でもある。今回の minimax theorem では、最大化側の変数 $Q$ に関して凹性が必要であるため、$Q$ に関する線形性はその条件を満たしている。
+
+以上より、今回の仮定のもとでは、$h(\theta,Q)$ は $\theta$ に関して凸、$Q$ に関して凹である。したがって minimax theorem を適用でき、
+
+$$
+\sup_{Q\in\mathcal{Q}}\inf_{\theta\in\Theta}h(\theta,Q)=\inf_{\theta\in\Theta}\sup_{Q\in\mathcal{Q}}h(\theta,Q)
+$$
+
+が成り立つ。
+
+[^2]: [Maurice Sion, “On General Minimax Theorems,” *Pacific Journal of Mathematics*, 8(1), 171–176, 1958.](https://projecteuclid.org/journals/pacific-journal-of-mathematics/volume-8/issue-1/On-general-minimax-theorems/pjm/1103040253.full)
+
+:::
+
 したがって、ある鞍点 $(\theta^*,Q^*)$ が存在し、
 
 $$
@@ -925,7 +1014,7 @@ $$
 
 ただし、この結果は、DRO と任意の固定的な upweighting が同じであることを意味しない。対応する $Q^*$ は DRO 問題の鞍点として得られるものであり、単純な逆頻度重みなどと一致するとは限らない。
 
-:::
+::::
 
 ### 6.5 非凸設定では等価性が崩れる
 
@@ -1216,9 +1305,7 @@ $$
 
 本論文の結論は、次の一文に集約できる。
 
-:::message
-**過剰パラメータ化モデルにおいて、Group DRO は単独では最悪グループ汎化を十分に改善しない。最悪グループ性能を改善するには、Group DRO によって worst-group training loss を重視するだけでなく、正則化によって group-wise generalization gap を制御する必要がある。**
-:::
+過剰パラメータ化モデルにおいて、Group DRO は単独では最悪グループ汎化を十分に改善しない。最悪グループ性能を改善するには、Group DRO によって worst-group training loss を重視するだけでなく、正則化によって group-wise generalization gap を制御する必要がある。
 
 ### 8.1 ERM と naive Group DRO：平均精度では見えない失敗
 
@@ -1276,7 +1363,7 @@ Table 2 は、group adjustment によって worst-group accuracy が改善する
 したがって、本論文の主張は、単に「Group DRO がロバスト性を改善する」というものではない。正確には、
 
 :::message
-**Group DRO は worst-group training loss を制御する手法であり、過剰パラメータ化モデルにおいて worst-group test performance を改善するには、正則化によって group-wise generalization gap を制御する必要がある。**
+Group DRO は worst-group training loss を制御する手法であり、過剰パラメータ化モデルにおいて worst-group test performance を改善するには、正則化によって group-wise generalization gap を制御する必要がある。
 :::
 
 という主張である。
