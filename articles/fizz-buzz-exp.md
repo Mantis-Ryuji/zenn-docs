@@ -1,5 +1,5 @@
 ---
-title: "ニューラルネットワークは FizzBuzz の規則を理解できるのか：桁の外挿で検証する"
+title: "ニューラルネットワークは FizzBuzz の規則を理解できるのか：桁の外挿実験"
 emoji: "🍣"
 type: "tech" # tech: 技術記事 / idea: アイデア
 topics: ["AI","深層学習","Pytorch","FizzBuzz"]
@@ -250,9 +250,6 @@ $$
 :::
 
 さらに本記事では、モデルサイズを変化させることで、容量の増加がこの外挿性能にどのように影響するかも検証します。
-
-> **GRU tutorial**
-> @[card](https://docs.pytorch.org/docs/2.12/generated/torch.nn.GRU.html)
 
 [^1]: [Jeffrey L. Elman, "Finding Structure in Time", Cognitive Science, 14(2), 179–211, 1990.](https://doi.org/10.1207/s15516709cog1402_1)
 [^2]: [Kyunghyun Cho, Bart van Merrienboer, Caglar Gulcehre, Dzmitry Bahdanau, Fethi Bougares, Holger Schwenk, Yoshua Bengio "Learning Phrase Representations using RNN Encoder-Decoder for Statistical Machine Translation", arXiv:1406.1078, 2014.](https://arxiv.org/abs/1406.1078)
