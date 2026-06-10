@@ -1,5 +1,5 @@
 ---
-title: "ニューラルネットワークは FizzBuzz の規則を理解できるのか：桁の外挿実験"
+title: "ニューラルネットワークは FizzBuzz を「理解」できるのか――未知の桁数への外挿実験"
 emoji: "🍣"
 type: "tech" # tech: 技術記事 / idea: アイデア
 topics: ["AI","深層学習","Pytorch","FizzBuzz"]
@@ -251,6 +251,158 @@ $$
 
 さらに本記事では、モデルサイズを変化させることで、容量の増加がこの外挿性能にどのように影響するかも検証します。
 
+:::details モデルの詳細
+本実験では、整数 $n$ を数値特徴量として直接モデルに入力するのではなく、10進表記の digit 列として扱います。例えば、
+
+$$
+12345 \rightarrow [1,2,3,4,5]
+$$
+
+のように、整数を左から右へ並んだ digit ID 列に変換します。
+
+ここで重要なのは、モデルに入力しているのは整数 $12345$ そのものではなく、各桁を表す token ID の列であるという点です。したがって、embedding を持つ対象も整数 $1,2,\ldots,99999$ ではなく、digit token $0,1,2,\ldots,9$ です。
+
+また、可変長の digit 列を batch として扱うために padding token を導入します。本実装では語彙サイズを $V=11$ とし、digit ID $0,\ldots,9$ に加えて、padding ID として $10$ を用います。ここで、digit ID $0$ は数字の $0$ を表す token であり、padding ではない点に注意してください。
+
+embedding 次元を $D$、GRU の hidden 次元を $H$、バッチサイズを $B$、最大系列長を $T$ とします。入力 token ID 列は、
+
+$$
+\mathbf{I} \in \{0,1,\ldots,10\}^{B \times T}
+$$
+
+です。
+
+ここでいう Embedding (`nn.Embedding`) は、token ID を index として embedding table から対応するベクトルを取り出す lookup 操作です。Embedding table は、学習可能な行列
+
+$$
+\mathbf{E} \in \mathbb{R}^{V \times D}
+$$
+
+として表されます。この $\mathbf{E}$ は、token ID をキーとして embedding vector を取り出す辞書のようなものです。つまり、$\mathbf{E}$ の各行が、それぞれの token ID に対応する embedding vector です。
+
+例えば、
+
+$$
+\mathbf{E}_{0,:}, \mathbf{E}_{1,:}, \ldots, \mathbf{E}_{9,:}, \mathbf{E}_{10,:}
+$$
+
+は、それぞれ digit ID $0,1,\ldots,9$ と padding ID $10$ に対応する embedding vector です。
+
+token ID $i$ に対応する embedding vector を
+
+$$
+\mathbf{e}_i = \mathbf{E}_{i,:} \in \mathbb{R}^{D}
+$$
+
+と書くことにします。このとき、token ID 列は Embedding によって
+
+$$
+[1,2,3,4,5]
+\xrightarrow{\mathbf{E}}
+[\mathbf{e}_1,\mathbf{e}_2,\mathbf{e}_3,\mathbf{e}_4,\mathbf{e}_5]
+$$
+
+という embedding vector の列に変換されます。
+
+つまり、token ID の整数値 $1,2,3,4,5$ をそのまま数値として扱っているのではなく、それぞれの ID を embedding table の index として使い、対応する embedding vector を取り出しています。
+
+さらに、各 token ID $I_{b,t}$ に対して、対応する embedding vector を取り出すことで、
+
+$$
+\mathbf{X}_{b,t,:} = \mathbf{E}_{I_{b,t},:}
+$$
+
+を得ます。したがって、embedding 後の入力は、
+
+$$
+\mathbf{X} \in \mathbb{R}^{B \times T \times D}
+$$
+
+となります。
+
+例えば、最大系列長が $5$ の batch 内で $123$ を扱う場合、右 padding と Embedding によって
+
+$$
+123
+\rightarrow
+[1,2,3,10,10]
+\xrightarrow{\mathbf{E}}
+[\mathbf{e}_1,\mathbf{e}_2,\mathbf{e}_3,\mathbf{e}_{10},\mathbf{e}_{10}]
+$$
+
+に変換されます。このとき、有効系列長は $\ell=3$ です。
+
+本実装では、右 padding された系列と有効系列長 $\ell$ を用いて `pack_padded_sequence` を適用しています。そのため、GRU は padding 部分を系列として処理せず、有効な digit 列のみを読みます。上の例では、実際に GRU が読む系列は $[\mathbf{e}_1,\mathbf{e}_2,\mathbf{e}_3]$ であり、$[\mathbf{e}_{10},\mathbf{e}_{10}]$ に対応する padding 部分は系列処理から除外されます。
+
+GRU は、各時刻 $t$ において、現在の入力 $\mathbf{x}_t$ と前時刻の hidden state $\mathbf{h}_{t-1}$ から、次の hidden state $\mathbf{h}_t$ を計算します。padding のない系列として概念的に書けば、
+
+$$
+\begin{aligned}
+\mathbf{x}_t &\in \mathbb{R}^{B \times D} \\
+\mathbf{h}_{t-1} &\in \mathbb{R}^{B \times H} \\
+\mathbf{h}_{t} &\in \mathbb{R}^{B \times H}
+\end{aligned}
+$$
+
+です。
+
+GRU の更新は、概念的には
+
+$$
+\mathbf{h}_t = f_{\theta}(\mathbf{x}_t, \mathbf{h}_{t-1})
+$$
+
+と書けます。ここで、$f_{\theta}$ は GRU の学習可能パラメータ $\theta$ によって定まる状態更新関数です。
+
+GRU の詳細にはここでは立ち入りませんが、重要なのは、この $\theta$ が時刻ごとに異なるのではなく、全時刻で共有される点です。つまり、5桁の入力に対しては、
+
+$$
+\begin{aligned}
+\mathbf{h}_1 &= f_{\theta}(\mathbf{x}_1, \mathbf{h}_0) \\
+\mathbf{h}_2 &= f_{\theta}(\mathbf{x}_2, \mathbf{h}_1) \\
+\mathbf{h}_3 &= f_{\theta}(\mathbf{x}_3, \mathbf{h}_2) \\
+\mathbf{h}_4 &= f_{\theta}(\mathbf{x}_4, \mathbf{h}_3) \\
+\mathbf{h}_5 &= f_{\theta}(\mathbf{x}_5, \mathbf{h}_4)
+\end{aligned}
+$$
+
+のように、同じ更新関数を繰り返し適用します。
+
+したがって、計算グラフの構造としては、6桁の入力に対しても同じ更新関数を追加で適用できます。
+
+$$
+\mathbf{h}_6 = f_{\theta}(\mathbf{x}_6, \mathbf{h}_5)
+$$
+
+このように、GRU は系列長に対して同じ状態更新関数を反復適用する構造を持つため、5桁までで学習したモデルを、6桁・7桁・8桁の入力にも構造上は適用できます。
+
+ただし、これは外挿性能を保証するものではありません。GRU が単に学習範囲内の digit パターンを記憶しているだけであれば、桁数が増えたときに性能は崩れます。一方で、FizzBuzz の背後にある剰余規則に対応する状態更新を内部的に獲得していれば、桁数が増えても性能を維持できる可能性があります。
+
+実際、10進表記の digit を左から順に読むとき、整数の $m$ による剰余は
+
+$$
+r_t^{(m)}=(10r_{t-1}^{(m)} + d_t) \bmod m
+$$
+
+という再帰的な更新で計算できます。ここで、$d_t$ は時刻 $t$ の digit、$r_t$ は時刻 $t$ まで読んだ時点での剰余です。FizzBuzz では $m=3$ と $m=5$ に対する剰余が分かればよいため、GRU がこのような状態更新を hidden state 内部で近似的に獲得できれば、未知の桁数に対しても汎化できる可能性があります。
+
+最終的に、GRU の最後の hidden state を線形分類器に入力し、FizzBuzz の4クラス分類を行います。
+
+まとめると、本モデルは
+
+$$
+\text{digit ID列}
+\rightarrow
+\text{Embedding lookup}
+\rightarrow
+\text{GRU}
+\rightarrow
+\text{Linear classifier}
+$$
+
+という構成です。
+:::
+
 [^1]: [Jeffrey L. Elman, "Finding Structure in Time", Cognitive Science, 14(2), 179–211, 1990.](https://doi.org/10.1207/s15516709cog1402_1)
 [^2]: [Kyunghyun Cho, Bart van Merrienboer, Caglar Gulcehre, Dzmitry Bahdanau, Fethi Bougares, Holger Schwenk, Yoshua Bengio "Learning Phrase Representations using RNN Encoder-Decoder for Statistical Machine Translation", arXiv:1406.1078, 2014.](https://arxiv.org/abs/1406.1078)
 [^3]: [Albert Gu and Tri Dao, "Mamba: Linear-Time Sequence Modeling with Selective State Spaces", arXiv:2312.00752, 2023.](https://arxiv.org/abs/2312.00752)
@@ -260,17 +412,19 @@ $$
 ## 4. 実験
 
 
+
+
 @[card](https://github.com/Mantis-Ryuji/FizzBuzz)
 
 ---
 
-## 5. 結果
+## 5. 結果と考察 
 
+
+### 追加実験: Grokking
 
 ---
 
 ## 6. さいごに
-
-面白い題材だったのにも関わらず、渡してはいけない情報を渡している記事が多かったので不満に思い、この記事を執筆してみました。
 
 なお、AIを用いずに外挿精度 100% を達成するアルゴリズムがあるらしいです。いやいや...そんなわけ...今までの実験を無駄だって言いたいんですか？
