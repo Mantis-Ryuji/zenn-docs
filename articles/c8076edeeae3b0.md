@@ -1,7 +1,7 @@
 ---
 title: "BYOLを理解する：負例なし学習と崩壊回避のメカニズム"
 emoji: "🐈"
-type: "tech" # tech: 技術記事 / idea: アイデア
+type: "idea" # tech: 技術記事 / idea: アイデア
 topics: ["AI", "深層学習", "自己教師あり学習", "BYOL"]
 published: true
 ---
