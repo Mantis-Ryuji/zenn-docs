@@ -253,21 +253,31 @@ $$
 12345 \rightarrow [1,2,3,4,5]
 $$
 
-のように、整数を左から右へ並んだ digit ID 列に変換します。
+のように、整数を左から右へ並んだ digit の列に変換します。
 
-ここで重要なのは、モデルに入力しているのは整数 $12345$ そのものではなく、各桁を表す token ID の列であるという点です。したがって、embedding を持つ対象も整数 $1,2,\ldots,99999$ ではなく、digit token $0,1,2,\ldots,9$ です。
+このとき、各 digit は embedding table を参照するための ID として扱います。本実装では、digit $0,1,\ldots,9$ に対して、そのまま digit ID $0,1,\ldots,9$ を割り当てます。したがって、整数 $12345$ は digit ID 列
 
-また、可変長の digit 列を batch として扱うために padding token を導入します。本実装では語彙サイズを $V=11$ とし、digit ID $0,\ldots,9$ に加えて、padding ID として $10$ を用います。ここで、digit ID $0$ は数字の $0$ を表す token であり、padding ではない点に注意してください。
+$$
+[1,2,3,4,5]
+$$
 
-embedding 次元を $D$、GRU の hidden 次元を $H$、バッチサイズを $B$、最大系列長を $T$ とします。入力 token ID 列は、
+として表されます。
+
+ここで重要なのは、digit ID の整数値を数値特徴量として扱っているわけではないという点です。例えば digit ID $7$ は、「数値としての $7$」をモデルに入力しているのではなく、「digit $7$ に対応する embedding vector を取り出すための ID」です。つまり、digit ID は embedding table を参照するための index として使われます。
+
+したがって、embedding を持つ対象は整数 $1,2,\ldots,99999$ ではありません。embedding を持つ対象は、あくまで digit $0,1,2,\ldots,9$ です。
+
+また、可変長の digit 列を扱うために、padding 用の ID も導入します。本実装では ID の種類を $V=11$ とし、digit ID $0,\ldots,9$ に加えて、padding ID として $10$ を用います。
+
+embedding 次元を $D$、GRU の hidden 次元を $H$、バッチサイズを $B$、最大系列長を $T$ とします。padding を含む入力 ID 列を
 
 $$
 \mathbf{I} \in \{0,1,\ldots,10\}^{B \times T}
 $$
 
-です。
+とします。ここで、$\mathbf{I}$ の各要素 $I_{b,t}$ は、$b$ 番目のサンプルにおける $t$ 番目の ID を表します。
 
-ここでいう Embedding (`nn.Embedding`) は、token ID を index として embedding table から対応するベクトルを取り出す lookup 操作です。Embedding table は、学習可能な行列
+ここでいう Embedding (`nn.Embedding`) は、入力された ID を index として embedding table から対応するベクトルを取り出す lookup 操作です。Embedding table は、学習可能な行列
 
 $$
 \mathbf{E} \in \mathbb{R}^{V \times D}
@@ -275,7 +285,7 @@ $$
 
 として表されます。
 
-例えば、
+この embedding table の各行が、それぞれの ID に対応する embedding vector です。例えば、
 
 $$
 \mathbf{E}_{0,:}, \mathbf{E}_{1,:}, \ldots, \mathbf{E}_{9,:}, \mathbf{E}_{10,:}
@@ -283,13 +293,13 @@ $$
 
 は、それぞれ digit ID $0,1,\ldots,9$ と padding ID $10$ に対応する embedding vector です。
 
-token ID $i$ に対応する embedding vector を
+ID $i$ に対応する embedding vector を
 
 $$
 \mathbf{e}_i = \mathbf{E}_{i,:} \in \mathbb{R}^{D}
 $$
 
-と書くことにします。このとき、token ID 列は Embedding によって
+と書くことにします。このとき、digit ID 列は embedding table $\mathbf{E}$ を参照することで、
 
 $$
 [1,2,3,4,5]
@@ -299,12 +309,12 @@ $$
 
 という embedding vector の列に変換されます。
 
-つまり、token ID の整数値 $1,2,3,4,5$ をそのまま数値として扱っているのではなく、それぞれの ID を embedding table の index として使い、対応する embedding vector を取り出しています。
+つまり、ID の整数値 $1,2,3,4,5$ をそのまま数値として扱っているのではなく、それぞれの ID を embedding table の index として使い、対応する embedding vector を取り出しています。
 
-さらに、各 token ID $I_{b,t}$ に対して、対応する embedding vector を取り出すことで、
+さらに、各 ID $I_{b,t}$ に対して、対応する embedding vector を取り出すことで、
 
 $$
-\mathbf{X}_{b,t,:} = \mathbf{E}_{I_{b,t},:}
+\mathbf{X}_{b,t,:} = \mathbf{e}_{I_{b,t}}
 $$
 
 を得ます。したがって、embedding 後の入力は、
@@ -315,7 +325,23 @@ $$
 
 となります。
 
-例えば、最大系列長が $5$ の batch 内で $123$ を扱う場合、右 padding と Embedding によって
+ここまでで説明した ID 列、embedding、padding の処理を、具体例で確認します。
+
+最大系列長が $5$ の batch 内で整数 $123$ を扱うとします。この場合、元の digit ID 列は
+
+$$
+[1,2,3]
+$$
+
+です。ただし、batch 内で系列長をそろえるため、右 padding によって padding ID $10$ を末尾に追加します。
+
+$$
+[1,2,3]
+\rightarrow
+[1,2,3,10,10]
+$$
+
+この入力 ID 列を embedding table で変換すると、
 
 $$
 123
@@ -325,11 +351,13 @@ $$
 [\mathbf{e}_1,\mathbf{e}_2,\mathbf{e}_3,\mathbf{e}_{10},\mathbf{e}_{10}]
 $$
 
-に変換されます。このとき、有効系列長は $\ell=3$ です。
+となります。この例では、実際の digit は $1,2,3$ の3つなので、有効系列長は $\ell=3$ です。
 
-本実装では、右 padding された系列と有効系列長 $\ell$ を用いて `pack_padded_sequence` を適用しています。そのため、GRU は padding 部分を系列として処理せず、有効な digit 列のみを読みます。上の例では、実際に GRU が読む系列は $[\mathbf{e}_1,\mathbf{e}_2,\mathbf{e}_3]$ であり、$[\mathbf{e}_{10},\mathbf{e}_{10}]$ に対応する padding 部分は系列処理から除外されます。
+本実装では、右 padding された系列と有効系列長 $\ell$ を用いて `pack_padded_sequence` を適用しています。そのため、GRU は padding 部分を系列として処理せず、有効な digit 列のみを読みます。上の例では、GRU が実際に読む系列は $[\mathbf{e}_1,\mathbf{e}_2,\mathbf{e}_3]$ であり、$[\mathbf{e}_{10},\mathbf{e}_{10}]$ に対応する padding 部分は系列処理から除外されます。
 
-GRU は、各時刻 $t$ において、現在の入力 $\mathbf{x}_t$ と前時刻の hidden state $\mathbf{h}_{t-1}$ から、次の hidden state $\mathbf{h}_t$ を計算します。padding のない系列として書けば、
+以上が、整数 $123$ を入力した場合の具体的な処理です。
+
+ここからは、padding 部分を除いた有効系列に対する GRU の処理を一般形で書きます。GRU は、各時刻 $t$ において、現在の入力 $\mathbf{x}_t$ と前時刻の hidden state $\mathbf{h}_{t-1}$ から、次の hidden state $\mathbf{h}_t$ を計算します。padding のない系列として書けば、
 
 $$
 \mathbf{x}_t \in \mathbb{R}^{B \times D},\quad
@@ -527,7 +555,7 @@ $$
 * 5の倍数でないものを `Number`
 * 5の倍数であるものを `Buzz`
 
-と予測したとします。この場合、正しく分類できるのは `Number` と `Buzz` のみです。FizzBuzz のクラス比は、おおよそ
+と予測したとします。この場合、正しく分類できるのは `Number` と `Buzz` のみです。FizzBuzz のクラス比は、
 
 $$
 \text{Number}:\text{Fizz}:\text{Buzz}:\text{FizzBuzz}=8:4:2:1
@@ -543,21 +571,15 @@ $$
 
 したがって、学習初期に見られる $0.667$ 付近の plateau は、モデルがまず末尾 digit に基づく5の倍数規則を利用している状態だと解釈できます。この段階では、`Number` と `Buzz` はある程度分類できますが、3の倍数が絡む `Fizz` と `FizzBuzz` は十分に扱えていません。
 
-その後、ある epoch を境に Training Acc が急激に $1.00$ へ上昇しています。これは、モデルが5の倍数判定だけでは解けなかった3の倍数判定を獲得し、`Fizz` と `FizzBuzz` を正しく分類できるようになったことを示唆しています。つまり、学習過程は
-
-$$
-\text{5の倍数に基づくショートカット解}\rightarrow\text{3の倍数判定を含む FizzBuzz 規則}
-$$
-
-という段階的な変化として見ることができます。
+その後、ある epoch を境に Training Acc が急激に $1.00$ へ上昇しています。これは、モデルが5の倍数判定だけでは解けなかった3の倍数判定を急に獲得し、`Fizz` と `FizzBuzz` を正しく分類できるようになったことを示唆しています。
 
 また、この急激な上昇が起きる epoch はモデルによって異なります。つまり、すべてのモデルが最終的には Training Acc $1.00$ に到達しているものの、3の倍数規則を獲得するタイミングはモデルサイズによって異なっています。
 
 ここで重要なのは、3の倍数規則を学習データ上で解けるようになったことと、それを未見の桁数へ外挿できることは同じではないという点です。実際、前節で見たように、100 epoch 時点ではすべてのモデルが Training Acc $1.00$ に到達しているにもかかわらず、6桁・7桁・8桁への外挿性能には大きな差がありました。
 
-この特徴的な学習曲線は、モデルが最初から FizzBuzz の規則全体を滑らかに獲得しているわけではないことを示唆しています。また、訓練精度がある段階で急激に変化する挙動は、grokking[^5] を連想させます。grokking では、訓練データへの適合が先に進み、その後かなり遅れてテスト性能が改善するような現象が報告されています。今回の実験でも、Training Acc が $1.00$ に到達した後に、モデル内部の規則表現がさらに変化し、桁外挿性能が遅れて改善する可能性があります。
+この特徴的な学習曲線は、訓練精度がある段階で急激に変化する、Grokking[^5] を連想させます。grokking では、訓練データへの適合が先に進み、その後かなり遅れてテスト性能が改善するような現象が報告されています。今回の実験でも、Training Acc が $1.00$ に到達した後に、モデル内部の規則表現がさらに変化し、桁外挿性能が遅れて改善する可能性があります。
 
-ただし、この学習曲線だけでは grokking と断定することはできません。ここで確認できているのは、あくまで学習データに対する Accuracy の推移です。grokking 的な挙動として解釈するためには、Training Acc が $1.00$ に到達した後、未見の桁数に対する性能、すなわち6桁・7桁・8桁への外挿性能がどのように変化するかを確認する必要があります。
+ただし、この学習曲線だけでは Grokking と断定することはできません。ここで確認できているのは、あくまで学習データに対する Accuracy の推移です。Grokking 的な挙動として解釈するためには、Training Acc が $1.00$ に到達した後、未見の桁数に対する性能、すなわち6桁・7桁・8桁への外挿性能がどのように変化するかを確認する必要があります。
 
 そこで次節では、学習 epoch 数を変化させ、各時点の重みに対して桁外挿性能を評価します。これにより、訓練データを解けるようになった後に、外挿性能が遅れて改善するのかを検証します。
 
@@ -565,10 +587,28 @@ $$
 
 ---
 
-## 5. 追加実験: Grokking 的挙動の検証
+## 5. Grokking 的挙動の検証
 
 ### 5.1 実験条件
 
+本章では、学習 epoch 数を変化させ、各時点のモデルに対して桁外挿性能を評価します。具体的には、以下の checkpoint におけるモデルを保存し、それぞれについて6桁・7桁・8桁のテストデータで評価します。
+
+評価対象のモデル構成は、前章と同じ `small`、`medium`、`large` の3種類です。学習データ、評価データ、optimizer、損失関数などの基本設定も前章と同一とし、変更するのは学習 epoch 数のみです。
+
+| 項目                | 設定                                     |
+| ----------------- | -------------------------------------- |
+| モデル               | `small`, `medium`, `large`             |
+| 学習データ             | 1桁〜5桁の整数                               |
+| 評価データ             | 6桁・7桁・8桁の整数                            |
+| optimizer         | AdamW                                  |
+| learning rate     | $1.0 \times 10^{-3}$                   |
+| weight decay      | $1.0 \times 10^{-4}$                   |
+| loss function     | CrossEntropyLoss                       |
+| checkpoint epochs | 10, 50, 100, 500, 1,000, 5,000, 10,000 |
+
+この実験の目的は、Training Acc が $1.00$ に到達した後も、桁外挿性能が変化するかを確認することです。もし訓練性能が先に飽和し、その後かなり遅れて外挿性能が改善するのであれば、FizzBuzz においても Grokking 的な挙動が生じている可能性があります。
+
+一方で、学習を長く続けても外挿性能が改善しない場合、モデルは5桁以下の学習範囲に対しては適合しているものの、未見の桁数へ適用可能な形では FizzBuzz の規則を獲得できていないと考えられます。
 
 ### 5.2 実験結果
 
@@ -579,7 +619,9 @@ $$
 ## 6. さいごに
 
 
-
-@[card](https://github.com/Mantis-Ryuji/FizzBuzz)
-
 なお、AIを用いずに外挿精度 100% を達成するアルゴリズムがあるらしいです。いやいや...そんなわけ...今までの実験を無駄だって言いたいんですか？
+
+---
+
+> 本記事で用いた実験コード、設定ファイル、評価スクリプト、および各実験条件で学習したモデルの重みは、以下のリポジトリで公開しています。
+> @[card](https://github.com/Mantis-Ryuji/FizzBuzz)
