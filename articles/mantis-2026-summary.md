@@ -78,6 +78,9 @@ AIが発達し、簡単に論文のまとめを出せる中で、わかった気
 @[card](https://arxiv.org/abs/2111.06377)
 > Masked Reconstruction を Vision に適した表現学習課題へ作り直した論文。
 > 記事：[Masked Autoencoders (MAE) 論文解説 ― なぜ高マスク率と非対称設計が効くのか](https://zenn.dev/mantis_ryuji/articles/67e096d62c9265) 
+@[card](https://arxiv.org/abs/2301.00808)
+> 
+> 記事：[ConvNext V2 論文解説：CNN のための Masked Autoencoder](https://zenn.dev/mantis_ryuji/articles/9628b8eef173d4)
 
 ここら辺は何を持ち帰ればいいのだろうか。面白いんだが汎化とは違って手法そのものは陳腐化しやすい。思想を学べたらいいのかなあ。
 それにしても MIM 系が安定択すぎる。
