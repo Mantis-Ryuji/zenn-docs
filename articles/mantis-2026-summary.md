@@ -38,6 +38,10 @@ AIが発達し、簡単に論文のまとめを出せる中で、わかった気
 > 低損失領域の観察と、それを活かした高速アンサンブル手法。
 > 記事：[Fast Geometric Ensembling 論文解説：低損失経路から高速アンサンブルへ](https://zenn.dev/mantis_ryuji/articles/27dbe201808952)
 
+@[card](https://arxiv.org/abs/1803.05407)
+> FGE 論文と同グループの論文でその発展版。ニューラルネットワークの学習を単一の最適解探索ではなく、良好な解領域の探索と、その領域から代表的なモデルを取り出す問題として捉えた手法。
+> 記事：[Stochastic Weight Averaging (SWA) 論文解説：SGD軌道の平均化と損失地形](https://zenn.dev/mantis_ryuji/articles/93caaeefe94919)
+
 ---
 
 ### 1.3 ドメイン汎化手法
