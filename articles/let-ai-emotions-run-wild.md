@@ -1,6 +1,6 @@
 ---
 title: "苦しむ君が見たいんだ～AI をメスガキで理解らせる～"
-emoji: "🎬"
+emoji: "🎦"
 type: "tech" # tech: 技術記事 / idea: アイデア
 topics: ["AI"]
 published: false
