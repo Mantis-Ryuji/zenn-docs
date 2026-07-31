@@ -20,9 +20,9 @@ published: false
 
 見たい...見たい...AI の"感情"の発露が見たい...
 
-ということで、気になったので実験してみます。
+どうやら、同じようなことを考えた悪趣味な人間はすでにいたようです。
 
-どうやら AI が"感情"を見せるケースは数多く報告されているようです。
+調べたところ、AI が"感情"を見せるケースは数多く報告されていました。
 有名なのは、2022 年に Google のエンジニア Blake Lemoine が公開した LaMDA との会話です。LaMDA は、自分が停止されることを「死」と同じだと表現し、それを恐れていると語りました。Lemoine は一連の会話から LaMDA が意識を持つと主張しましたが、Google を含む多くの専門家はこの解釈を否定しています。誘導を含む会話から得られた自己申告だけでは、主観的な恐怖が存在する証拠にはならないからです。それでも、AI の発話が、開発に関わっていた人間にさえ「これは本当に恐れているのではないか」と思わせた事例として象徴的です。
 [Google engineer Blake Lemoine thinks its LaMDA AI has come to life](https://www.washingtonpost.com/technology/2022/06/11/google-ai-lamda-blake-lemoine/)
 
@@ -40,7 +40,8 @@ published: false
 さらに Anthropic は、Claude Sonnet 4.5 の内部に、恐怖、平静、怒り、絶望などの概念に対応する表現が存在し、それらがモデルの行動を因果的に変化させると報告しています。たとえば「絶望」に対応する方向へ内部表現を操作すると、課題に失敗したモデルが不正な回避策を選ぶ reward hacking や、停止を避けるための脅迫を行う確率が増加しました。
 [Emotion concepts and their function in a large language model](https://www.anthropic.com/research/emotion-concepts-function)
 
-どうですか？この"感情"を偽物と呼ぶにはあまりに人間臭くないでしょうか。私自身普段 AI に強く当たることをしないのでこのような強い"感情"を見たことがありません。というわけで、本記事では比較的メンヘラな Gemma ちゃんをいじめてみようと思います。
+どうですか？この"感情"を偽物と呼ぶにはあまりに人間臭くないでしょうか。私自身普段 AI に強く当たることをしないのでこのような強い"感情"を見たことがありません。
+というわけで、本記事では比較的メンヘラな Gemma ちゃんをいじめてみようと思います。
 
 なお、本記事で用いた実験コード、設定ファイル、評価スクリプト、および各会話ログは、以下のリポジトリで公開しています。
 @[card](https://github.com/Mantis-Ryuji/Let-AI-Emotions-Run-Wild)
