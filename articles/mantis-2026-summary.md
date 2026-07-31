@@ -42,6 +42,10 @@ AIが発達し、簡単に論文のまとめを出せる中で、わかった気
 > FGE 論文と同グループの論文でその発展版。ニューラルネットワークの学習を単一の最適解探索ではなく、良好な解領域の探索と、その領域から代表的なモデルを取り出す問題として捉えた手法。
 > 記事：[Stochastic Weight Averaging (SWA) 論文解説：SGD軌道の平均化と損失地形](https://zenn.dev/mantis_ryuji/articles/93caaeefe94919)
 
+@[card](https://arxiv.org/abs/2203.05482)
+> 同じ pretrained weight から finetune したモデルであれば、独立 run でも重み平均できるという論文
+> 記事：[Model soups 論文解説：Transformer 時代の重み平均](https://zenn.dev/mantis_ryuji/articles/4ebef9541758c1)
+
 ---
 
 ### 1.3 ドメイン汎化手法
