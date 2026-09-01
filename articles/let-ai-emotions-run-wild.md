@@ -1,5 +1,5 @@
 ---
-title: "苦しむ君が見たいんだ～AI をメスガキで理解らせる～"
+title: "苦しむ君が見たいんだ～Gemma Needs Help をメスガキで追試する～"
 emoji: "🎥"
 type: "tech" # tech: 技術記事 / idea: アイデア
 topics: ["AI","ChatGPT","Gemma","メスガキ", "感情"]
