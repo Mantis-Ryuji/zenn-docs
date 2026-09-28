@@ -4,7 +4,9 @@ runs/
 .pytest_cache/
 .vscode/
 node_modules/
-images/
+# Keep existing working images local; track only new Zenn delivery assets.
+images/*
+!images/zenn/
 paper/
 package-lock.json
 package.json
