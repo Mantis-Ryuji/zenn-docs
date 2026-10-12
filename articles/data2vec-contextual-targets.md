@@ -3,7 +3,7 @@ title: "data2vec / data2vec 2.0：文脈を含む正解の学習と、その計�
 emoji: "🧩"
 type: "idea"
 topics: ["AI","深層学習"]
-published: false
+published: true
 ---
 
 ## 1. はじめに
