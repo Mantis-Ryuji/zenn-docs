@@ -3,7 +3,7 @@ title: "I-JEPA 論文解説：画素の再構成から、意味のある表現�
 emoji: "🔄"
 type: "idea"
 topics: ["AI","深層学習"]
-published: false
+published: true
 ---
 
 ## 1. はじめに
